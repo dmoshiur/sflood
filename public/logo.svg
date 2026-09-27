@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="96" viewBox="0 0 384 96" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">sflood</title>
+  <desc id="desc">sflood smart flood intelligence logo: a flowing river and connected signal.</desc>
+  <defs>
+    <linearGradient id="water" x1="12" y1="12" x2="76" y2="78" gradientUnits="userSpaceOnUse"><stop stop-color="#42D6B1"/><stop offset="1" stop-color="#67BFC0"/></linearGradient>
+    <linearGradient id="signal" x1="61" y1="17" x2="72" y2="29" gradientUnits="userSpaceOnUse"><stop stop-color="#FFD38E"/><stop offset="1" stop-color="#F49B76"/></linearGradient>
+  </defs>
+  <rect x="4" y="8" width="80" height="80" rx="25" fill="#153D36"/>
+  <path d="M16 56.5c9.8 0 9.8-13.2 19.6-13.2s9.8 13.2 19.6 13.2 9.8-13.2 19.6-13.2" stroke="url(#water)" stroke-width="6.5" stroke-linecap="round"/>
+  <path d="M19 68.2c8.3 0 8.3-6 16.6-6s8.3 6 16.6 6 8.3-6 16.6-6" stroke="#A9EAD5" stroke-opacity=".82" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M24 31.5h25" stroke="#B6D7CB" stroke-opacity=".88" stroke-width="4.5" stroke-linecap="round"/>
+  <circle cx="67.2" cy="28.7" r="8" fill="url(#signal)"/>
+  <circle cx="67.2" cy="28.7" r="3" fill="#FFF5DC"/>
+  <path d="M67.2 14.4v-3.1m13.5 17.4h3.1M57.6 19.1l-2.3-2.3" stroke="#F7C68A" stroke-width="1.7" stroke-linecap="round" opacity=".9"/>
+  <text x="101" y="54" fill="#173A33" font-family="Arial, Helvetica, sans-serif" font-size="39" font-weight="700" letter-spacing="-2.3">sflood</text>
+  <text x="103" y="73" fill="#59766D" font-family="Arial, Helvetica, sans-serif" font-size="9.1" font-weight="700" letter-spacing="2.05">SMART FLOOD INTELLIGENCE</text>
+</svg>
