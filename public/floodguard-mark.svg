@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs><linearGradient id="water" x1="30" y1="27" x2="91" y2="103" gradientUnits="userSpaceOnUse"><stop stop-color="#B7F073"/><stop offset="1" stop-color="#40C6A0"/></linearGradient><linearGradient id="signal" x1="80" y1="24" x2="99" y2="43" gradientUnits="userSpaceOnUse"><stop stop-color="#FFDB82"/><stop offset="1" stop-color="#F08A60"/></linearGradient></defs>
+  <rect x="5" y="5" width="118" height="118" rx="37" fill="#112D27"/>
+  <path d="M20 82c13 0 13-17 26-17s13 17 26 17 13-17 26-17" stroke="url(#water)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M27 98c11 0 11-8 22-8s11 8 22 8 11-8 22-8" stroke="#DDF6BC" stroke-width="5" stroke-linecap="round" opacity=".9"/>
+  <path d="M34 46h32" stroke="#A7C4B2" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="87" cy="41" r="12" fill="url(#signal)"/><circle cx="87" cy="41" r="4" fill="#FFF7D8"/>
+  <path d="M87 20v-5m21 26h5M72 26l-4-4" stroke="#FFD88B" stroke-width="2.4" stroke-linecap="round"/>
+</svg>
