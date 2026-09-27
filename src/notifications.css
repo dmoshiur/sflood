@@ -1,5 +1,5 @@
-.demo-mode-chip.mode-postgres { color: #4f7685; border-color: #d8e5e5; background: #edf5f3; }
-.demo-mode-chip.mode-postgres i { background: #62a39a; }
+.demo-mode-chip.mode-turso { color: #4f7685; border-color: #d8e5e5; background: #edf5f3; }
+.demo-mode-chip.mode-turso i { background: #62a39a; }
 .notification-panel { margin-top: 10px; padding: 13px 14px; }
 .notification-heading { display: flex; align-items: flex-start; gap: 9px; }
 .notification-icon { width: 32px; height: 32px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid #e5e8d8; border-radius: 5px; color: #8c7848; background: #f7f3e4; }

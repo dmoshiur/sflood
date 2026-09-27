@@ -12,6 +12,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["server/**/*.ts", "shared/**/*.ts", "prisma/seed.ts"],
+  "include": ["server/**/*.ts", "shared/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

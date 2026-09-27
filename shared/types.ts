@@ -33,7 +33,7 @@ export interface FloodEvent {
 }
 
 export interface DashboardPayload {
-  mode: 'simulation' | 'postgres';
+  mode: 'simulation' | 'turso';
   project: string;
   city: string;
   zone: string;
