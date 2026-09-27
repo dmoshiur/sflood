@@ -1,0 +1,303 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  VISITOR
+  MEMBER
+  OPERATOR
+  ADMIN
+  OWNER
+}
+
+enum DeviceKind {
+  ESP32_CONTROLLER
+  ESP8266_SENDER
+}
+
+enum FloodState {
+  SAFE
+  WATCH
+  WARNING
+  CRITICAL
+  UNKNOWN
+  FAULT
+}
+
+enum BarrierState {
+  DOWN
+  RAISING
+  RAISED
+  FAULT
+  HOLD
+}
+
+enum CommandStatus {
+  QUEUED
+  SENT
+  ACKNOWLEDGED
+  FAILED
+  CANCELLED
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  SENT
+  RETRYING
+  DEAD_LETTER
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  WEB_PUSH
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  cities    City[]
+  users     User[]
+  devices   Device[]
+}
+
+model City {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  zones     Zone[]
+  users     User[]
+  devices   Device[]
+  createdAt DateTime @default(now())
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Zone {
+  id        String   @id @default(cuid())
+  cityId    String
+  name      String
+  city      City     @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  users     User[]
+  devices   Device[]
+  createdAt DateTime @default(now())
+  @@unique([cityId, name])
+  @@index([cityId])
+}
+
+model User {
+  id                String   @id @default(cuid())
+  tenantId          String
+  cityId            String?
+  zoneId            String?
+  email             String   @unique
+  displayName       String
+  passwordHash      String
+  role              Role     @default(MEMBER)
+  emailVerifiedAt   DateTime?
+  disabledAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  city              City?    @relation(fields: [cityId], references: [id], onDelete: SetNull)
+  zone              Zone?    @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  passkeys          Passkey[]
+  sessions          Session[]
+  subscriptions     Subscription[]
+  auditLogs         AuditLog[]
+  @@index([tenantId, cityId, zoneId])
+  @@index([role])
+}
+
+model Passkey {
+  id             String   @id @default(cuid())
+  userId         String
+  credentialId   String   @unique
+  publicKey      Bytes
+  counter        BigInt   @default(0)
+  transports     Json?
+  deviceType     String?
+  backedUp       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  lastUsedAt     DateTime?
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  userId      String
+  tokenHash   String   @unique
+  csrfHash    String
+  ipAddress   String?
+  userAgent   String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, expiresAt])
+}
+
+model Device {
+  id              String     @id
+  tenantId        String
+  cityId          String
+  zoneId          String
+  name            String
+  kind            DeviceKind
+  apiKeyHash      String
+  firmwareVersion String
+  enabled         Boolean    @default(true)
+  lastSeenAt      DateTime?
+  lastSeq         Int        @default(0)
+  currentState    FloodState @default(UNKNOWN)
+  barrierState    BarrierState @default(DOWN)
+  barrierLatched  Boolean    @default(false)
+  emergencyStopActive Boolean @default(false)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  tenant          Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  city            City       @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  zone            Zone       @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  telemetry       Telemetry[]
+  commands        Command[]
+  @@index([tenantId, cityId, zoneId])
+  @@index([lastSeenAt])
+}
+
+model Telemetry {
+  id            String     @id @default(cuid())
+  deviceId      String
+  seq           Int
+  levelCm       Float
+  rainfallMm    Float?
+  state         FloodState
+  barrierState  BarrierState @default(DOWN)
+  sensorHealthy Boolean    @default(true)
+  batteryMv     Int?
+  rssi          Int?
+  createdAt     DateTime   @default(now())
+  device        Device     @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  @@unique([deviceId, seq])
+  @@index([deviceId, createdAt])
+}
+
+model Command {
+  id              String        @id @default(cuid())
+  deviceId        String
+  action          String
+  idempotencyKey  String        @unique
+  status          CommandStatus @default(QUEUED)
+  requestedById   String?
+  requestedAt     DateTime      @default(now())
+  acknowledgedAt  DateTime?
+  result          Json?
+  device          Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  @@index([deviceId, status, requestedAt])
+}
+
+model FirmwareRelease {
+  id          String   @id @default(cuid())
+  version     String   @unique
+  sha256      String
+  sizeBytes   Int
+  assetUrl    String
+  channel     String   @default("stable")
+  notes       String?
+  createdAt   DateTime @default(now())
+}
+
+model Subscription {
+  id                    String   @id @default(cuid())
+  userId                String?
+  tenantId              String
+  zoneId                String?
+  email                 String?
+  phone                 String?
+  pushEndpoint           String?  @unique
+  pushP256dh             String?
+  pushAuth               String?
+  consentAt              DateTime
+  verifiedAt             DateTime?
+  verificationTokenHash  String?
+  unsubscribeTokenHash   String?
+  unsubscribedAt         DateTime?
+  createdAt              DateTime @default(now())
+  user                   User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  @@index([tenantId, zoneId, verifiedAt])
+  @@index([email])
+}
+
+model OutboxEvent {
+  id            String             @id @default(cuid())
+  dedupeKey     String             @unique
+  tenantId      String
+  zoneId        String?
+  channel       NotificationChannel
+  recipient     String
+  payload       Json
+  status        OutboxStatus       @default(PENDING)
+  attempts      Int                @default(0)
+  nextAttemptAt DateTime           @default(now())
+  lastError     String?
+  createdAt     DateTime           @default(now())
+  sentAt        DateTime?
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, zoneId, createdAt])
+}
+
+model CommunityReport {
+  id          String   @id @default(cuid())
+  tenantId    String
+  cityId      String
+  zoneId      String
+  category    String
+  description String
+  latitude    Float?
+  longitude   Float?
+  status      String   @default("RECEIVED")
+  createdAt   DateTime @default(now())
+  @@index([tenantId, cityId, zoneId, createdAt])
+}
+
+model ContentRevision {
+  id          String   @id @default(cuid())
+  slug        String
+  title       String
+  content     Json
+  status      String   @default("DRAFT")
+  createdById String
+  createdAt   DateTime @default(now())
+  publishedAt DateTime?
+  @@index([slug, createdAt])
+}
+
+model SiteSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String?
+  userId      String?
+  action      String
+  targetType  String?
+  targetId    String?
+  ipAddress   String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  @@index([tenantId, createdAt])
+  @@index([userId, createdAt])
+}

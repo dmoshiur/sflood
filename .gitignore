@@ -1,4 +1,7 @@
 node_modules/
+dist/
+build/
+coverage/
 .env
 .env.*
 !.env.example
@@ -7,3 +10,6 @@ npm-debug.log*
 *.log
 /data/store.json
 /data/store.json.*.tmp
+/data/preview-store.json
+/data/preview-store.json.*.tmp
+firmware/**/config.h
