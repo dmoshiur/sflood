@@ -1,7 +1,7 @@
 import net from 'node:net';
 import nodemailer, { type Transporter } from 'nodemailer';
 import ipaddr from 'ipaddr.js';
-import { execute, isTursoConfigured, requireTurso } from './database.js';
+import { execute, turso } from './database.js';
 import { decryptSecret, encryptSecret } from './security.js';
 
 type SmtpConfig = { host: string; port: number; secure: boolean; username: string; password: string; fromName: string; fromAddress: string; replyTo?: string };
@@ -23,8 +23,6 @@ export async function getSavedProvider(provider: Provider) {
   return parseRow(result.rows[0] as Record<string, unknown>);
 }
 export async function providerAvailability() {
-  if (!isTursoConfigured) return { smtp: false, sms: false };
-  requireTurso();
   const result = await execute('SELECT provider,enabled FROM provider_configs');
   const states = new Map(result.rows.map((raw) => {
     const row = raw as Record<string, unknown>;
@@ -44,7 +42,7 @@ export async function providerSummary() {
 }
 
 export async function saveProvider(provider: Provider, config: SmtpConfig | SmsConfig, enabled: boolean, actorId: string) {
-  const client = requireTurso();
+  const client = turso;
   const now = new Date().toISOString();
   const encrypted = encryptSecret(JSON.stringify(config));
   await client.execute({
@@ -71,26 +69,35 @@ function smtpTransport(config: SmtpConfig): Transporter {
   });
 }
 
-export async function verifySmtpProvider() {
+export async function verifySmtpProvider(recipient?: string) {
   const saved = await getSavedProvider('SMTP');
   if (!saved?.enabled || !saved.config) throw new Error('SMTP provider is not configured and enabled.');
   const transport = smtpTransport(saved.config as SmtpConfig);
-  try { await transport.verify(); } finally { transport.close(); }
+  try {
+    await transport.verify();
+    if (recipient) await sendEmail(recipient, { title: 'FloodGrid gateway test', body: 'This is a settings test requested by an administrator. No emergency alert is active.' });
+  } finally { transport.close(); }
 }
 
-export async function sendEmail(recipient: string, payload: { title?: string; body?: string; url?: string }) {
+export async function sendEmail(recipient: string, payload: { title?: string; body?: string; url?: string; unsubscribeUrl?: string }): Promise<string | null> {
   const saved = await getSavedProvider('SMTP');
   if (!saved?.enabled || !saved.config) throw new Error('SMTP provider is disabled.');
   const config = saved.config as SmtpConfig;
   const transport = smtpTransport(config);
   try {
-    await transport.sendMail({
-      from: { name: config.fromName || 'FloodGuard', address: config.fromAddress },
+    const unsubscribe = payload.unsubscribeUrl ? `\n\nStop optional project updates: ${payload.unsubscribeUrl}` : '';
+    const info = await transport.sendMail({
+      from: { name: config.fromName || 'FloodGrid', address: config.fromAddress },
       to: recipient,
       replyTo: config.replyTo || undefined,
-      subject: (payload.title || 'FloodGuard update').slice(0, 180),
-      text: `${payload.body || 'Open FloodGuard to review the latest update.'}${payload.url ? `\n\n${new URL(payload.url, process.env.PUBLIC_APP_URL || 'https://example.invalid').toString()}` : ''}\n\nFloodGuard is an educational prototype, not an emergency service.`,
+      subject: (payload.title || 'FloodGrid update').slice(0, 180),
+      text: `${payload.body || 'Open FloodGrid to review the latest update.'}${payload.url ? `\n\n${new URL(payload.url, process.env.PUBLIC_APP_URL || 'https://example.invalid').toString()}` : ''}${unsubscribe}\n\nFloodGrid is an educational prototype, not an emergency service.`,
+      headers: {
+        'List-Unsubscribe': payload.unsubscribeUrl ? `<${payload.unsubscribeUrl}>` : undefined,
+        'Auto-Submitted': 'auto-generated',
+      } as Record<string, string>,
     });
+    return info?.messageId ? String(info.messageId).slice(0, 500) : null;
   } finally { transport.close(); }
 }
 
@@ -109,7 +116,7 @@ export async function sendSms(recipient: string, payload: { title?: string; body
   const config = saved.config as SmsConfig;
   const endpoint = validateSmsEndpoint(config.endpoint);
   const stopInstructions = payload.unsubscribeUrl ? ` To stop optional project updates, visit: ${payload.unsubscribeUrl}` : '';
-  const message = `${payload.title || 'FloodGuard update'}: ${payload.body || 'Open FloodGuard to review the latest update.'} FloodGuard is an educational prototype.${stopInstructions}`.slice(0, 1400);
+  const message = `${payload.title || 'FloodGrid update'}: ${payload.body || 'Open FloodGrid to review the latest update.'} FloodGrid is an educational prototype.${stopInstructions}`.slice(0, 1400);
   const body: Record<string, string> = { [config.toField]: recipient, [config.messageField]: message };
   if (config.senderField && config.senderId) body[config.senderField] = config.senderId;
   const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
@@ -121,7 +128,7 @@ export async function sendSms(recipient: string, payload: { title?: string; body
 export async function verifySmsProvider(recipient: string) {
   const saved = await getSavedProvider('SMS_HTTP');
   if (!saved?.enabled || !saved.config) throw new Error('SMS HTTP gateway is not configured and enabled.');
-  await sendSms(recipient, { title: 'FloodGuard gateway test', body: 'This is a settings test requested by your administrator. No emergency alert is active.' });
+  await sendSms(recipient, { title: 'FloodGrid gateway test', body: 'This is a settings test requested by your administrator. No emergency alert is active.' });
 }
 
 export function validateProviderInput(provider: ProviderType, input: Record<string, unknown>, previous?: SmtpConfig | SmsConfig | null) {
@@ -135,7 +142,7 @@ function parseSmtpInput(input: Record<string, unknown>, previous?: SmtpConfig | 
   const password = typeof input.password === 'string' && input.password ? input.password : previous?.password || '';
   const config: SmtpConfig = {
     host: String(input.host || '').trim(), port: Number(input.port), secure: Boolean(input.secure), username: String(input.username || '').trim(), password,
-    fromName: String(input.fromName || 'FloodGuard').trim(), fromAddress: String(input.fromAddress || '').trim().toLowerCase(), replyTo: String(input.replyTo || '').trim(),
+    fromName: String(input.fromName || 'FloodGrid').trim(), fromAddress: String(input.fromAddress || '').trim().toLowerCase(), replyTo: String(input.replyTo || '').trim(),
   };
   if (!config.host || config.host.length > 255 || /[\s/@?#]/.test(config.host) || config.host.includes('://')) throw new Error('Enter an SMTP hostname only; credentials and URL paths are not accepted in the host field.');
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new Error('SMTP port must be between 1 and 65535.');

@@ -12,4 +12,8 @@ npm-debug.log*
 /data/store.json.*.tmp
 /data/preview-store.json
 /data/preview-store.json.*.tmp
+/data/floodgrid.db
+/data/floodgrid.db-*
+/data/.dev-secret-marker
 firmware/**/config.h
+firmware/**/secrets.h

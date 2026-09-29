@@ -1,16 +1,22 @@
 {
-  "name": "floodguard",
-  "version": "0.2.0",
+  "name": "floodgrid",
+  "version": "1.0.0",
   "private": true,
-  "description": "FloodGuard — an educational smart flood-control and automation prototype.",
+  "description": "FloodGrid \u2014 Smart Flood Control & Automation: an educational IoT flood-monitoring and automated barrier prototype platform.",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web -c green,cyan \"tsx watch server/index.ts\" \"vite --host 0.0.0.0 --port 5173 --strictPort\"",
-    "build": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.json && vite build",
+    "build": "npm run icons && tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.json && vite build",
     "start": "tsx server/index.ts",
+    "preview": "npm run build && tsx server/index.ts",
     "test": "tsx --test server/**/*.test.ts",
+    "test:watch": "tsx --test --watch server/**/*.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
-    "db:seed": "tsx scripts/seed.ts"
+    "db:seed": "tsx scripts/seed.ts",
+    "db:reset": "node -e \"const fs=require('fs');for (const f of fs.readdirSync('data')) if (f.startsWith('floodgrid.db')) fs.rmSync('data/'+f);console.log('local database removed');\" && npm run db:migrate && npm run db:seed",
+    "icons": "node scripts/generate-icons.mjs",
+    "backup": "tsx scripts/backup.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.json"
   },
   "engines": {
     "node": ">=20.19"
@@ -20,6 +26,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
+    "bcryptjs": "^2.4.3",
     "cloudinary": "^2.7.0",
     "dotenv": "^16.6.1",
     "express": "^5.2.1",
@@ -27,6 +34,7 @@
     "ipaddr.js": "^2.5.0",
     "lucide-react": "^1.48.0",
     "nodemailer": "^10.0.11",
+    "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-router-dom": "^7.18.4",
@@ -34,9 +42,11 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/express": "^5.0.6",
     "@types/node": "^22.19.0",
     "@types/nodemailer": "^8.0.2",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.11",
     "@types/react-dom": "^19.2.3",
     "@types/web-push": "^3.6.4",

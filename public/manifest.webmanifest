@@ -1,15 +1,23 @@
 {
-  "name": "FloodGuard — Smart Flood Control & Automation",
-  "short_name": "FloodGuard",
-  "description": "Educational sensor-based flood-control demonstration.",
-  "lang": "en-BD",
-  "start_url": "/app",
+  "name": "FloodGrid — Smart Flood Control & Automation",
+  "short_name": "FloodGrid",
+  "description": "Live flood monitoring command centre for an educational prototype city. Not an emergency warning service.",
+  "lang": "en",
+  "start_url": "/status",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
-  "background_color": "#f4f5ed",
-  "theme_color": "#112d27",
+  "orientation": "any",
+  "background_color": "#0a1628",
+  "theme_color": "#0a1628",
+  "categories": ["education", "science", "utilities"],
   "icons": [
-    { "src": "/floodguard-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Live status", "url": "/status" },
+    { "name": "Dashboard", "url": "/app" },
+    { "name": "Devices", "url": "/devices" }
   ]
 }

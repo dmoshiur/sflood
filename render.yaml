@@ -1,0 +1,104 @@
+# Render blueprint for FloodGrid.
+#
+# One web service serves the JSON API and the built PWA. Migrations run at
+# startup, so a deploy is: build -> start -> migrate -> ready.
+#
+# Secrets are declared with sync:false so you set them in the Render dashboard
+# (or a secret manager) and they are never committed here. See docs/DEPLOYMENT.md.
+
+services:
+  - type: web
+    name: floodgrid
+    runtime: node
+    plan: starter
+    region: singapore
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health/ready
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render injects PORT. The app reads API_PORT first, then PORT.
+      - key: API_PORT
+        value: "3000"
+      - key: HOST
+        value: 0.0.0.0
+      # One proxy hop (Render's edge) sits in front of the app.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: APP_VERSION
+        value: 1.0.0
+
+      # Canonical public HTTPS origin. Render sets RENDER_EXTERNAL_URL; replace
+      # it with your own custom domain once one is attached.
+      - key: PUBLIC_APP_URL
+        fromService:
+          type: web
+          name: floodgrid
+          envVarKey: RENDER_EXTERNAL_URL
+
+      # --- secrets: set these in the dashboard, never in git ---------------
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SETTINGS_ENCRYPTION_KEY
+        sync: false
+      - key: OWNER_BOOTSTRAP_TOKEN
+        sync: false
+
+      # --- access control --------------------------------------------------
+      # Comma-separated CIDRs. Admin and device routes fail closed when empty.
+      - key: ADMIN_CIDR_ALLOWLIST
+        sync: false
+      - key: OPS_CIDR_ALLOWLIST
+        sync: false
+      - key: DEVICE_CIDR_ALLOWLIST
+        sync: false
+
+      # --- rotating operations credential ----------------------------------
+      - key: OPS_SECURITY_EMAIL
+        sync: false
+      - key: OPS_ROTATION_MINUTES
+        value: "60"
+      - key: OPS_CREDENTIAL_TTL_MINUTES
+        value: "75"
+      - key: OPS_MAX_ATTEMPTS
+        value: "5"
+      - key: OPS_REQUIRE_MFA
+        value: "true"
+
+      # --- optional integrations -------------------------------------------
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_UPLOAD_PRESET
+        sync: false
+      - key: FIRMWARE_GITHUB_ESP32_URL
+        sync: false
+      - key: FIRMWARE_GITHUB_ESP8266_URL
+        sync: false
+      - key: FIRMWARE_GITHUB_RELEASES_URL
+        sync: false
+
+      # Leave TURSO_DATABASE_URL empty to run on the local libSQL file. With a
+      # persistent disk attached (below) that file survives deploys and restarts.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+
+# Optional: keep the local libSQL database across deploys. Mount it at /data and
+# point LIBSQL_FILE at it. Remove this block when using Turso instead.
+#  disks:
+#    - name: floodgrid-data
+#      mountPath: /data
+#      sizeGB: 1
