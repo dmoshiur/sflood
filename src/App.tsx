@@ -14,6 +14,9 @@ import StatusPage from './pages/StatusPage';
 import AlertsPage from './pages/AlertsPage';
 import DevicesHubPage from './pages/DevicesHubPage';
 import { LoginPage, RegisterPage, ProfilePage } from './pages/AccountPages';
+import ContentPage from './pages/ContentPage';
+import { ContentBlocks, type ContentBlockData } from './components/ContentBlocks';
+import { getPublicContent } from './adminApi';
 import { ContentPanel, DevicesPanel, EnginePanel, MaintenancePanel, OpsPanel, ServiceAreasPanel } from './AdminPanels';
 import { translate, type CopyKey, type Language } from './i18n';
 import type { DashboardPayload, DeviceSummary, FloodEvent, TelemetryPoint } from '../shared/types';
@@ -130,6 +133,7 @@ function App() {
       <Route path="/app" element={<DashboardPage />} />
       <Route path="/app/history" element={<HistoryPage />} />
       <Route path="/status" element={<StatusPage />} />
+      <Route path="/page/:slug" element={<ContentPage />} />
       <Route path="/alerts" element={<AlertsPage />} />
       <Route path="/profile" element={<ProfilePage />} />
       <Route path="/devices" element={<DevicesHubPage />} />
@@ -222,7 +226,24 @@ function HomePage() {
     </section>
 
     <section className="home-bottom-cta page-width"><div className="bottom-cta-art" aria-hidden="true"><span></span><span></span><span></span></div><div><span className="section-kicker">TRY THE SAFE SIMULATOR</span><h2>Watch a threshold change<br />without moving real hardware.</h2><p>Raise and lower sample water readings, test sensor-fault behavior, and inspect the state history.</p></div><Link to="/app" className="button button-light">Open dashboard <ArrowRight size={16} /></Link></section>
+
+    <HomePublishedContent />
   </main>;
+}
+
+/** Published site-editor content for the `home` slug — rendered only when editors published a revision. */
+function HomePublishedContent() {
+  const [blocks, setBlocks] = useState<ContentBlockData[] | null>(null);
+  useEffect(() => {
+    getPublicContent('home')
+      .then((payload) => setBlocks(payload.page.content.blocks as unknown as ContentBlockData[]))
+      .catch(() => setBlocks(null)); // no published revision → render nothing (never filler)
+  }, []);
+  if (!blocks || blocks.length === 0) return null;
+  return <section className="home-published page-width">
+    <div className="section-kicker">PUBLISHED BY THE SITE EDITORS</div>
+    <ContentBlocks blocks={blocks} />
+  </section>;
 }
 
 function TrayDiagram() {

@@ -57,6 +57,7 @@ export interface FloodEventRow {
 export const getPublicStatus = () => request<PublicStatus>('/api/public/status');
 export const getServiceAreas = () => request<{ serviceAreas: ServiceArea[] }>('/api/public/service-areas');
 export const getFloodEvents = (limit = 20) => request<{ mode: string; simulation: boolean; events: FloodEventRow[] }>(`/api/public/flood-events?limit=${limit}`);
+export const getPublicContent = (slug: string) => request<{ page: { title: string; content: { blocks: Array<Record<string, unknown>> } } }>(`/api/public/content/${encodeURIComponent(slug)}`);
 
 export const registerAccount = (input: { name: string; email: string; password: string; countryCode: string; cityName: string; consent: true }) =>
   request<{ created: boolean; verificationQueued: boolean; message: string }>('/api/auth/register', { method: 'POST', body: JSON.stringify(input) });

@@ -11,6 +11,7 @@ import {
   opsAudit, opsDeployment, opsLock, opsStatus, opsUnlock,
   type ContentBlock, type ContentRevisionView, type ServiceArea,
 } from './adminApi';
+import { ContentBlocks, type ContentBlockData } from './components/ContentBlocks';
 
 function useAsync<T>(loader: () => Promise<T>) {
   const [data, setData] = useState<T | null>(null);
@@ -260,6 +261,7 @@ export function ContentPanel() {
       <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
       <button className="admin-secondary-button" onClick={() => setPreview(!preview)}>{preview ? 'Edit' : 'Preview'}</button>
       <button className="admin-primary-button" onClick={() => void saveDraft()}>Save draft</button>
+      <a className="admin-secondary-button" href={`/page/${slug || 'home'}`} target="_blank" rel="noopener noreferrer">View public page</a>
     </div>
     {!preview && (
       <div className="content-blocks">
@@ -306,14 +308,8 @@ export function ContentPanel() {
     )}
     {preview && (
       <div className="content-preview">
-        {blocks.map((block, index) => (
-          <div key={index} className={`preview-block preview-${block.type}`}>
-            <strong>{String(block.title ?? block.label ?? block.type)}</strong>
-            <p>{String(block.body ?? '')}</p>
-            {block.type === 'status' && <p className="gauge-footnote">[Live status widget renders here on the public page]</p>}
-            {block.type === 'chart' && <p className="gauge-footnote">[Real telemetry chart renders here — never fabricated data]</p>}
-          </div>
-        ))}
+        <p className="gauge-footnote">Rendering exactly what the public page shows, with live data for status and chart blocks.</p>
+        <ContentBlocks blocks={blocks as ContentBlockData[]} />
       </div>
     )}
     <h3 className="console-subhead"><Layers3 size={14} /> Revisions</h3>
