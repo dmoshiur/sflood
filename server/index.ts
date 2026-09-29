@@ -5,9 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type ErrorRequestHandler } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import ipaddr from 'ipaddr.js';
 import { z } from 'zod';
-import { barrierForInputs, floodStateForLevel } from '../shared/flood-state.js';
+import { barrierForInputs, floodStateForLevel, normalizeFloodState } from '../shared/flood-state.js';
 import type { FloodState } from '../shared/flood-state.js';
 import type { FloodEvent } from '../shared/types.js';
 import { createFreshPreviewStore, currentPreviewState, getPreviewDashboard, makeTelemetryPoint, readStore, writeStore } from './data.js';
@@ -16,8 +15,12 @@ import {
   getTursoDevices, getTursoHistory, ingestTursoTelemetry, isTursoConfigured,
   DatabaseRequestError, execute, randomId, currentTimestamp, rowText, rowBoolean,
 } from './database.js';
-import { authRouter, ownerRouter } from './auth.js';
+import { authRouter, ownerRouter, opsRouter } from './auth.js';
 import './admin.js';
+import './admin-extra.js';
+import { publicRouter, deviceRouter } from './public-api.js';
+import { profileRouter } from './profile.js';
+import { hashToken, safeEqualHex, isIpAllowedByCidr, isTrustedPushEndpoint } from './http-utils.js';
 import { hasCanonicalPublicUrl, notificationConfig, startNotificationWorker } from './notifications.js';
 import { sendSms } from './providers.js';
 import { createSmsUnsubscribeToken, hashSmsVerificationCode } from './security.js';
@@ -55,6 +58,10 @@ app.use(express.json({ limit: '16kb', strict: true }));
 app.use('/api', apiLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/owner', ownerRouter);
+app.use('/api/ops', opsRouter);
+app.use('/api/profile', profileRouter);
+app.use('/api/public', publicRouter);
+app.use('/api/v1', deviceRouter);
 
 const simulateSchema = z.object({
   action: z.enum(['rise', 'recede', 'sensor-fault', 'sensor-recovered', 'estop', 'estop-reset', 'reset']),
@@ -64,24 +71,19 @@ const telemetrySchema = z.object({
   seq: z.number().int().nonnegative(),
   levelCm: z.number().finite().min(0).max(500),
   rainfallMm: z.number().finite().min(0).max(1000).optional(),
+  rateOfRiseCmPerMin: z.number().finite().min(-100).max(100).optional(),
   sensorHealthy: z.boolean().optional().default(true),
-  state: z.enum(['SAFE', 'WATCH', 'WARNING', 'CRITICAL', 'UNKNOWN', 'FAULT']).optional(),
+  /** Legacy 'SAFE' is accepted and normalized to 'NORMAL' server-side. */
+  state: z.enum(['SAFE', 'NORMAL', 'WATCH', 'WARNING', 'CRITICAL', 'RECOVERY', 'UNKNOWN', 'FAULT']).optional(),
   barrierState: z.enum(['DOWN', 'RAISING', 'RAISED', 'FAULT', 'HOLD']).optional(),
+  limitSwitchState: z.enum(['OPEN', 'CLOSED', 'UNKNOWN', 'TRAVELING']).optional(),
   emergencyStopActive: z.boolean().optional().default(false),
+  rssi: z.number().int().min(-120).max(20).optional(),
+  uptimeS: z.number().int().nonnegative().max(4_000_000_000).optional(),
+  firmwareVersion: z.string().min(1).max(40).optional(),
+  faultState: z.string().max(60).optional(),
+  timestamp: z.string().datetime({ offset: true }).optional(),
 });
-export function isTrustedPushEndpoint(value: string) {
-  try {
-    const endpoint = new URL(value);
-    const host = endpoint.hostname.toLowerCase().replace(/\.$/, '');
-    if (endpoint.protocol !== 'https:' || (endpoint.port && endpoint.port !== '443') || ipaddr.isValid(host)) return false;
-    return host === 'fcm.googleapis.com'
-      || host === 'android.googleapis.com'
-      || host === 'web.push.apple.com'
-      || host.endsWith('.push.apple.com')
-      || host === 'push.services.mozilla.com'
-      || host.endsWith('.push.services.mozilla.com');
-  } catch { return false; }
-}
 
 const pushSubscriptionSchema = z.object({
   consent: z.literal(true),
@@ -93,48 +95,30 @@ const pushSubscriptionSchema = z.object({
 const pushUnsubscribeSchema = z.object({ endpoint: z.string().url().max(2048).refine((value) => value.startsWith('https://')) });
 const emailSubscriptionSchema = z.object({ consent: z.literal(true), email: z.string().email().max(254).transform((value) => value.trim().toLowerCase()) });
 
-function hashToken(token: string) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
 
-function safeEqualHex(a: string, b: string) {
-  if (!/^[a-f0-9]{64}$/i.test(a) || !/^[a-f0-9]{64}$/i.test(b)) return false;
-  return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
-}
-
-function isIpAllowedByCidr(address: string, list: string | undefined) {
-  const cidrs = (list || '').split(',').map((item) => item.trim()).filter(Boolean);
-  if (!cidrs.length) return false;
-  try {
-    const client = ipaddr.process(address);
-    return cidrs.some((cidr) => {
-      try {
-        const [range, prefix] = ipaddr.parseCIDR(cidr);
-        return client.kind() === range.kind() && client.match(range, prefix);
-      } catch { return false; }
-    });
-  } catch { return false; }
-}
-
-function isReportedStateConsistent(state: FloodState | undefined, levelCm: number, sensorHealthy: boolean, emergencyStopActive: boolean) {
-  if (emergencyStopActive) return state === 'FAULT';
-  if (!sensorHealthy) return state === undefined || state === 'UNKNOWN';
-  if (!state) return true;
-  if (state === 'UNKNOWN' || state === 'FAULT') return false;
-  const bands: Record<'SAFE' | 'WATCH' | 'WARNING' | 'CRITICAL', (level: number) => boolean> = {
-    SAFE: (level) => level < 22,
+function isReportedStateConsistent(state: string | undefined, levelCm: number, sensorHealthy: boolean, emergencyStopActive: boolean) {
+  const normalized = state === undefined ? undefined : normalizeFloodState(state);
+  if (emergencyStopActive) return normalized === 'FAULT';
+  if (!sensorHealthy) return normalized === undefined || normalized === 'UNKNOWN';
+  if (!normalized) return true;
+  if (normalized === 'UNKNOWN' || normalized === 'FAULT') return false;
+  // Hysteresis overlap bands: a device report must sit inside the documented overlap.
+  const bands: Record<'NORMAL' | 'RECOVERY' | 'WATCH' | 'WARNING' | 'CRITICAL', (level: number) => boolean> = {
+    NORMAL: (level) => level < 23,
+    RECOVERY: (level) => level < 23,
     WATCH: (level) => level >= 18 && level < 37,
     WARNING: (level) => level >= 33 && level < 52,
     CRITICAL: (level) => level >= 48,
   };
-  return bands[state](levelCm);
+  return bands[normalized as keyof typeof bands](levelCm);
 }
 
 function eventForState(state: FloodState, previous: FloodState): FloodEvent | null {
   if (state === previous) return null;
   const createdAt = new Date().toISOString();
   const messages: Record<FloodState, { title: string; message: string }> = {
-    SAFE: { title: 'Level returned to SAFE', message: 'The simulated reading is below 20 cm. Keep monitoring local conditions.' },
+    NORMAL: { title: 'Level returned to NORMAL', message: 'The simulated reading is below 20 cm. Keep monitoring local conditions.' },
+    RECOVERY: { title: 'Recovery in progress', message: 'The simulated level is receding. NORMAL resumes after the recovery cooldown.' },
     WATCH: { title: 'WATCH threshold reached', message: 'Sample water level is 20–34 cm. The buzzer pattern is set to chirp in the demo.' },
     WARNING: { title: 'WARNING threshold reached', message: 'Sample water level is 35–49 cm. Barrier-raise logic is active in simulation.' },
     CRITICAL: { title: 'CRITICAL threshold reached', message: 'Sample water level is 50 cm or higher. The demo barrier remains latched raised.' },
@@ -155,7 +139,14 @@ function appendTelemetry(
   forcedState?: FloodState,
 ) {
   const previousState = previousStateOverride ?? currentPreviewState(store);
-  const nextState = forcedState ?? (store.emergencyStopActive ? 'FAULT' : sensorHealthy ? floodStateForLevel(levelCm) : 'UNKNOWN');
+  let nextState = forcedState ?? (store.emergencyStopActive ? 'FAULT' : sensorHealthy ? floodStateForLevel(levelCm) : 'UNKNOWN');
+  // Demonstrate the RECOVERY workflow: receding from an alert state passes
+  // through RECOVERY until the level is below the recovery threshold (15 cm).
+  if (!forcedState && sensorHealthy && !store.emergencyStopActive && nextState === 'NORMAL'
+    && ['WATCH', 'WARNING', 'CRITICAL', 'RECOVERY'].includes(previousState)) {
+    nextState = levelCm > 15 ? 'RECOVERY' : 'NORMAL';
+    if (previousState === 'RECOVERY' && levelCm > 15) nextState = 'RECOVERY';
+  }
   const previousBarrier = store.barrier;
 
   store.sensorHealthy = sensorHealthy;
@@ -170,6 +161,8 @@ function appendTelemetry(
     store.barrierLatched = true;
   }
   if (nextState === 'UNKNOWN' && previousBarrier === 'RAISED') store.barrier = 'HOLD';
+  if (nextState === 'RECOVERY' && (previousBarrier === 'RAISED' || previousBarrier === 'HOLD')) { store.barrier = 'RAISED'; store.barrierLatched = true; }
+  if (nextState === 'NORMAL' && previousState === 'RECOVERY') { store.barrier = 'DOWN'; store.barrierLatched = false; }
 
   const point = makeTelemetryPoint({
     deviceId,
@@ -210,6 +203,14 @@ function appendTelemetry(
 let databaseReady = false;
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'floodguard-api', mode: isTursoConfigured ? 'turso' : 'simulation', databaseReady: databaseReady, now: new Date().toISOString() });
+});
+
+app.get('/api/health/ready', async (_req, res) => {
+  if (!isTursoConfigured) {
+    res.json({ ready: true, mode: 'simulation', note: 'Local simulation mode; no database required.' });
+    return;
+  }
+  res.json({ ready: databaseReady, mode: 'turso', databaseReady });
 });
 
 app.get('/api/dashboard', async (_req, res) => {
@@ -294,7 +295,9 @@ app.post('/api/demo/simulate', simulatorLimiter, (req, res, next) => {
 app.post('/api/v1/telemetry', telemetryLimiter, async (req, res, next) => {
   const parsed = telemetrySchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid telemetry payload.' }); return; }
-  const reportedState = parsed.data.state ?? (parsed.data.emergencyStopActive ? 'FAULT' : parsed.data.sensorHealthy ? floodStateForLevel(parsed.data.levelCm) : 'UNKNOWN');
+  const reportedState: FloodState = parsed.data.state
+    ? normalizeFloodState(parsed.data.state)
+    : (parsed.data.emergencyStopActive ? 'FAULT' : parsed.data.sensorHealthy ? floodStateForLevel(parsed.data.levelCm) : 'UNKNOWN');
   if (isTursoConfigured && !isIpAllowedByCidr(req.ip || req.socket.remoteAddress || '', process.env.DEVICE_CIDR_ALLOWLIST)) {
     res.status(403).json({ error: 'Device-ingest source IP is not in the configured CIDR allowlist.' }); return;
   }
@@ -311,8 +314,24 @@ app.post('/api/v1/telemetry', telemetryLimiter, async (req, res, next) => {
     if (parsed.data.emergencyStopActive && parsed.data.barrierState && parsed.data.barrierState !== 'FAULT') { res.status(400).json({ error: 'An active E-stop must report actuator state FAULT.' }); return; }
     if (reportedState === 'UNKNOWN' && parsed.data.barrierState && parsed.data.barrierState !== 'HOLD') { res.status(400).json({ error: 'A sensor fault must hold the last actuator position.' }); return; }
     if ((reportedState === 'WARNING' || reportedState === 'CRITICAL') && parsed.data.barrierState && !['RAISED', 'RAISING'].includes(parsed.data.barrierState)) { res.status(400).json({ error: 'WARNING/CRITICAL telemetry cannot report a lowered barrier.' }); return; }
-    const result = await ingestTursoTelemetry({ ...parsed.data, deviceState: reportedState, reportedBarrier: parsed.data.barrierState });
-    res.status(202).json({ accepted: true, ...result, note: 'Telemetry accepted. The server does not issue motor commands.' });
+    const result = await ingestTursoTelemetry({
+      deviceId: parsed.data.deviceId,
+      seq: parsed.data.seq,
+      levelCm: parsed.data.levelCm,
+      rainfallMm: parsed.data.rainfallMm,
+      sensorHealthy: parsed.data.sensorHealthy,
+      deviceState: reportedState,
+      reportedBarrier: parsed.data.barrierState,
+      emergencyStopActive: parsed.data.emergencyStopActive,
+      rateOfRiseCmPerMin: parsed.data.rateOfRiseCmPerMin ?? null,
+      rssi: parsed.data.rssi ?? null,
+      uptimeS: parsed.data.uptimeS ?? null,
+      firmwareVersion: parsed.data.firmwareVersion ?? null,
+      faultState: parsed.data.faultState ?? null,
+      limitSwitchState: parsed.data.limitSwitchState ?? null,
+      reportedAt: parsed.data.timestamp ?? null,
+    });
+    res.status(202).json({ accepted: true, ...result, note: 'Telemetry accepted and stored; barrier automation follows the configured policy with local fail-safe priority.' });
     return;
   }
 
@@ -576,4 +595,4 @@ async function startServer() {
 
 if (process.env.NODE_ENV !== 'test') void startServer();
 
-export { app, appendTelemetry, isIpAllowedByCidr, safeEqualHex, hashToken };
+export { app, appendTelemetry, isIpAllowedByCidr, safeEqualHex, hashToken, isTrustedPushEndpoint };

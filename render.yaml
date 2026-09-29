@@ -1,0 +1,45 @@
+# FloodGuard Render blueprint (https://render.com/docs/blueprint-spec)
+# Provision a Turso database separately and paste its URL/token into the
+# dashboard environment (see docs/DEPLOYMENT.md).
+services:
+  - type: web
+    name: floodguard-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.0
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: SETTINGS_ENCRYPTION_KEY
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: OWNER_BOOTSTRAP_TOKEN
+        sync: false
+      - key: ADMIN_CIDR_ALLOWLIST
+        sync: false
+      - key: DEVICE_CIDR_ALLOWLIST
+        sync: false
+      - key: OPS_SECURITY_EMAIL
+        sync: false
+      - key: PUBLIC_APP_URL
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      - key: IPINFO_TOKEN
+        sync: false

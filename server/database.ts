@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient, type Client, type InValue, type ResultSet, type Transaction } from '@libsql/client';
-import { buzzerForState, floodStateForLevel, type BarrierState, type FloodState } from '../shared/flood-state.js';
+import { buzzerForState, normalizeFloodState, type BarrierState, type FloodState } from '../shared/flood-state.js';
+import { rateOfRiseCmPerMin } from '../shared/flood-engine.js';
 import type { DashboardPayload, DeviceSummary, FloodEvent, TelemetryPoint } from '../shared/types.js';
-import { createSmsUnsubscribeToken } from './security.js';
 
 const dbUrl = process.env.TURSO_DATABASE_URL || '';
 export const turso: Client | null = dbUrl
@@ -79,7 +79,7 @@ function toPoint(raw: unknown): TelemetryPoint {
   const row = asRow(raw);
   return {
     id: text(row, 'id'), deviceId: text(row, 'device_id'), seq: number(row, 'seq'), levelCm: number(row, 'level_cm'),
-    rainfallMm: nullableNumber(row, 'rainfall_mm'), state: text(row, 'state', 'UNKNOWN') as FloodState,
+    rainfallMm: nullableNumber(row, 'rainfall_mm'), state: normalizeFloodState(text(row, 'state', 'UNKNOWN')),
     sensorHealthy: boolean(row, 'sensor_healthy'), createdAt: iso(row.created_at),
   };
 }
@@ -95,13 +95,17 @@ function toDevice(raw: unknown): DeviceSummary {
     zone: text(row, 'zone_name'), firmwareVersion: text(row, 'firmware_version'),
     online: boolean(row, 'enabled') && Number.isFinite(seenMs) && Date.now() - seenMs < 120_000,
     lastSeenAt, signal: rssi === null ? 82 : Math.max(0, Math.min(100, Math.round((rssi + 100) * 3))),
-    latestLevelCm: nullableNumber(row, 'latest_level_cm'), state: text(row, 'latest_state', 'UNKNOWN') as FloodState,
+    latestLevelCm: nullableNumber(row, 'latest_level_cm'), state: normalizeFloodState(text(row, 'latest_state', 'UNKNOWN')),
+    approvalState: text(row, 'approval_state', 'APPROVED'),
+    limitSwitchState: text(row, 'limit_switch_state') || null,
+    faultState: text(row, 'fault_state') || null,
   };
 }
 
 function eventTitle(state: string): [string, string] {
   return ({
-    SAFE: ['Level returned to SAFE', 'The latest calibrated sample is below 20 cm.'],
+    NORMAL: ['Level returned to NORMAL', 'The latest calibrated sample is below 20 cm.'],
+    RECOVERY: ['Recovery in progress', 'The water level is receding; NORMAL resumes after the recovery cooldown.'],
     WATCH: ['WATCH threshold reached', 'Sample water level is 20–34 cm.'],
     WARNING: ['WARNING threshold reached', 'Barrier-raise logic is active on the local controller.'],
     CRITICAL: ['CRITICAL threshold reached', 'The barrier remains raised and latched.'],
@@ -142,11 +146,22 @@ export async function getTursoDashboard(): Promise<DashboardPayload> {
   const zoneCount = await execute('SELECT COUNT(*) AS count FROM zones WHERE city_id=?', [text(controller, 'city_id')]);
   const maintenanceResult = await execute("SELECT value_json FROM site_settings WHERE key='maintenance_mode'");
   const maintenanceMode = maintenanceResult.rows.length > 0 && text(asRow(maintenanceResult.rows[0]), 'value_json') === 'true';
+  // The event feed comes from persisted flood_events (the flood engine writes one
+  // row per transition). Derived transitions are only a fallback for old data.
   const events: FloodEvent[] = [];
-  for (let i = 1; i < history.length; i += 1) {
-    if (history[i].state !== history[i - 1].state && history[i].state !== 'SAFE') {
-      const [title, message] = eventTitle(history[i].state);
-      events.push({ id: `transition-${history[i].id}`, title, message, state: history[i].state, createdAt: history[i].createdAt });
+  try {
+    const persisted = await execute('SELECT id,state,reason,created_at FROM flood_events WHERE device_id=? ORDER BY created_at DESC LIMIT 8', [text(controller, 'id')]);
+    for (const raw of persisted.rows) {
+      const row = asRow(raw);
+      const [title, message] = eventTitle(text(row, 'state'));
+      events.push({ id: text(row, 'id'), title, message: text(row, 'reason') || message, state: normalizeFloodState(text(row, 'state')), createdAt: iso(row.created_at) });
+    }
+  } catch {
+    for (let i = 1; i < history.length; i += 1) {
+      if (history[i].state !== history[i - 1].state && history[i].state !== 'NORMAL') {
+        const [title, message] = eventTitle(history[i].state);
+        events.push({ id: `transition-${history[i].id}`, title, message, state: history[i].state, createdAt: history[i].createdAt });
+      }
     }
   }
   const state = boolean(controller, 'emergency_stop_active') ? 'FAULT' : latestState;
@@ -192,40 +207,93 @@ export async function getTursoDeviceCredential(deviceId: string) {
 export async function ingestTursoTelemetry(input: {
   deviceId: string; seq: number; levelCm: number; rainfallMm?: number; sensorHealthy: boolean;
   deviceState?: FloodState; reportedBarrier?: BarrierState; emergencyStopActive?: boolean;
+  rateOfRiseCmPerMin?: number | null; rssi?: number | null; uptimeS?: number | null;
+  firmwareVersion?: string | null; faultState?: string | null; limitSwitchState?: string | null;
+  reportedAt?: string | null;
 }) {
   const client = requireTurso();
+  const { evaluateAndRecord } = await import('./flood-engine.js');
+  const deviceResult = await execute('SELECT * FROM devices WHERE id=?', [input.deviceId]);
+  if (!deviceResult.rows.length || !boolean(asRow(deviceResult.rows[0]), 'enabled')) throw new DatabaseRequestError(401, 'Device credentials are invalid.');
+  const device = asRow(deviceResult.rows[0]);
+  if (text(device, 'approval_state', 'APPROVED') !== 'APPROVED') throw new DatabaseRequestError(403, 'Device is not approved for telemetry ingestion.');
+  if (input.seq <= number(device, 'last_seq')) throw new DatabaseRequestError(409, 'Sequence number was already received or is out of order.');
+  const emergencyStopActive = input.emergencyStopActive ?? false;
+  const now = Date.now();
+  const createdAt = new Date(now).toISOString();
+
+  // Rate of rise: prefer the device-reported value, otherwise derive from the previous sample.
+  const prior = await execute('SELECT level_cm,created_at FROM telemetry WHERE device_id=? ORDER BY seq DESC LIMIT 1', [input.deviceId]);
+  const priorLevel = prior.rows.length ? nullableNumber(asRow(prior.rows[0]), 'level_cm') : null;
+  const priorAt = prior.rows.length ? new Date(iso(asRow(prior.rows[0]).created_at)).getTime() : 0;
+  const rate = Number.isFinite(input.rateOfRiseCmPerMin ?? NaN) && (input.rateOfRiseCmPerMin ?? null) !== null
+    ? Number(input.rateOfRiseCmPerMin)
+    : rateOfRiseCmPerMin(priorLevel, priorAt, input.levelCm, now);
+
+  // Flood engine decides the persistent state (NORMAL … RECOVERY) with hysteresis,
+  // rate-of-rise, cooldown and duplicate-event prevention; it also persists the
+  // flood event, fans out notifications, applies barrier automation and audits.
+  const evaluation = await evaluateAndRecord({
+    tenantId: text(device, 'tenant_id'),
+    zoneId: text(device, 'zone_id'),
+    deviceId: input.deviceId,
+    levelCm: input.levelCm,
+    sensorHealthy: input.sensorHealthy,
+    emergencyStopActive,
+    reportedBarrier: input.reportedBarrier,
+    reportedState: input.deviceState,
+    now,
+    simulation: false,
+  });
+
+  const nextState: FloodState = !input.sensorHealthy ? 'UNKNOWN' : emergencyStopActive ? 'FAULT' : evaluation.engineState;
+  let barrier: BarrierState = input.sensorHealthy ? 'DOWN' : 'HOLD';
+  let latched = input.reportedBarrier === 'DOWN' ? false : boolean(device, 'barrier_latched');
+  if (emergencyStopActive) barrier = 'FAULT';
+  else if (input.reportedBarrier) barrier = input.reportedBarrier;
+  else if (nextState === 'WARNING' || nextState === 'CRITICAL') { barrier = 'RAISED'; latched = true; }
+  else if (nextState === 'UNKNOWN') barrier = 'HOLD';
+  else if (latched) barrier = 'RAISED';
+  if (barrier === 'RAISED' || barrieringOrRaised(barrier)) latched = true;
+
+  const pointId = id();
   const tx = await client.transaction('write');
   try {
-    const deviceResult = await tx.execute({ sql: 'SELECT * FROM devices WHERE id=?', args: [input.deviceId] });
-    if (!deviceResult.rows.length || !boolean(asRow(deviceResult.rows[0]), 'enabled')) throw new DatabaseRequestError(401, 'Device credentials are invalid.');
-    const device = asRow(deviceResult.rows[0]);
-    if (input.seq <= number(device, 'last_seq')) throw new DatabaseRequestError(409, 'Sequence number was already received or is out of order.');
-    const previousState = text(device, 'current_state', 'UNKNOWN') as FloodState;
-    const emergencyStopActive = input.emergencyStopActive ?? false;
-    const nextState = input.deviceState ?? (emergencyStopActive ? 'FAULT' : input.sensorHealthy ? floodStateForLevel(input.levelCm) : 'UNKNOWN');
-    let barrier: BarrierState = input.sensorHealthy ? 'DOWN' : 'HOLD';
-    let latched = input.reportedBarrier === 'DOWN' ? false : boolean(device, 'barrier_latched');
-    if (emergencyStopActive) barrier = 'FAULT';
-    else if (input.reportedBarrier) barrier = input.reportedBarrier;
-    else if (nextState === 'WARNING' || nextState === 'CRITICAL') { barrier = 'RAISED'; latched = true; }
-    else if (nextState === 'UNKNOWN') barrier = 'HOLD';
-    else if (latched) barrier = 'RAISED';
-    if (barrier === 'RAISED' || barrier === 'RAISING') latched = true;
-    const createdAt = new Date().toISOString();
-    const pointId = id();
-    await tx.execute({ sql: `INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,state,barrier_state,sensor_healthy,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, args: [pointId, input.deviceId, input.seq, input.levelCm, input.rainfallMm ?? null, nextState, barrier, input.sensorHealthy ? 1 : 0, createdAt] });
-    await tx.execute({ sql: 'UPDATE devices SET last_seq=?,last_seen_at=?,current_state=?,barrier_state=?,barrier_latched=?,emergency_stop_active=?,updated_at=? WHERE id=?', args: [input.seq, createdAt, nextState, barrier, latched ? 1 : 0, emergencyStopActive ? 1 : 0, createdAt, input.deviceId] });
-    if (nextState !== previousState) {
-      await insertAudit({ tenantId: text(device, 'tenant_id'), action: 'TELEMETRY_STATE_CHANGE', targetType: 'device', targetId: input.deviceId, metadata: { from: previousState, to: nextState, seq: input.seq, levelCm: input.levelCm } }, tx);
-      if (nextState === 'WARNING' || nextState === 'CRITICAL') await queueZoneAlerts({ device, pointId: input.seq, state: nextState, levelCm: input.levelCm, createdAt }, tx);
-    }
+    await tx.execute({
+      sql: `INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,rate_of_rise_cm_min,state,barrier_state,limit_switch_state,sensor_healthy,rssi,uptime_s,firmware_version,fault_state,reported_at,received_at,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      args: [
+        pointId, input.deviceId, input.seq, input.levelCm, input.rainfallMm ?? null, Math.round(rate * 100) / 100,
+        nextState, barrier, input.limitSwitchState ?? null, input.sensorHealthy ? 1 : 0,
+        input.rssi ?? null, input.uptimeS ?? null, input.firmwareVersion ?? null, input.faultState ?? null,
+        input.reportedAt ?? null, createdAt, createdAt,
+      ],
+    });
+    await tx.execute({
+      sql: 'UPDATE devices SET last_seq=?,last_seen_at=?,current_state=?,barrier_state=?,barrier_latched=?,emergency_stop_active=?,rate_of_rise_cm_min=?,last_rssi=?,uptime_s=?,fault_state=?,limit_switch_state=?,firmware_version=COALESCE(?,firmware_version),updated_at=? WHERE id=?',
+      args: [
+        input.seq, createdAt, nextState, barrier, latched ? 1 : 0, emergencyStopActive ? 1 : 0,
+        Math.round(rate * 100) / 100, input.rssi ?? null, input.uptimeS ?? null, input.faultState ?? null,
+        input.limitSwitchState ?? null, input.firmwareVersion ?? null, createdAt, input.deviceId,
+      ],
+    });
     await tx.commit();
-    return { id: pointId, seq: input.seq, state: nextState, barrier };
   } catch (error) {
     await tx.rollback();
     if (String((error as { code?: string }).code || '').includes('SQLITE_CONSTRAINT')) throw new DatabaseRequestError(409, 'Duplicate or replayed telemetry.');
     throw error;
   }
+  return {
+    id: pointId, seq: input.seq, state: nextState, engineState: evaluation.engineState, barrier,
+    rateOfRiseCmPerMin: Math.round(rate * 100) / 100,
+    floodEventId: evaluation.floodEventId, commandId: evaluation.commandId,
+    changed: evaluation.changed, duplicateSuppressed: evaluation.duplicateSuppressed,
+    barrierPolicy: evaluation.barrierPolicy, barrierReason: evaluation.barrierReason,
+  };
+}
+
+function barrieringOrRaised(barrier: BarrierState): boolean {
+  return barrier === 'RAISED' || barrier === 'RAISING';
 }
 
 export function notificationTargetsForSubscription(recipient: Record<string, unknown>) {
@@ -238,41 +306,6 @@ export function notificationTargetsForSubscription(recipient: Record<string, unk
   if (phone && text(recipient, 'phone_verified_at')) targets.push({ channel: 'SMS', recipient: phone });
   if (pushEndpoint) targets.push({ channel: 'WEB_PUSH', recipient: subscriptionId });
   return targets;
-}
-
-function smsUnsubscribeUrl(subscriptionId: string) {
-  const origin = process.env.PUBLIC_APP_URL;
-  if (!origin) return null;
-  try {
-    const base = new URL(origin);
-    if (base.protocol !== 'https:' && process.env.NODE_ENV === 'production') return null;
-    const link = new URL('/api/notifications/unsubscribe', base);
-    link.searchParams.set('token', createSmsUnsubscribeToken(subscriptionId));
-    return link.toString();
-  } catch { return null; }
-}
-
-async function queueZoneAlerts(input: { device: Row; pointId: number; state: FloodState; levelCm: number; createdAt: string }, executor: Transaction) {
-  const device = input.device;
-  const recipients = await executor.execute({ sql: 'SELECT * FROM subscriptions WHERE tenant_id=? AND zone_id=? AND unsubscribed_at IS NULL AND (verified_at IS NOT NULL OR phone_verified_at IS NOT NULL OR push_endpoint IS NOT NULL)', args: [text(device, 'tenant_id'), text(device, 'zone_id')] });
-  const [title, body] = eventTitle(input.state);
-  for (const raw of recipients.rows) {
-    const recipient = asRow(raw);
-    const subscriptionId = text(recipient, 'id');
-    const targetRows = notificationTargetsForSubscription(recipient);
-    for (const target of targetRows) {
-      let payload: string;
-      if (target.channel === 'SMS') {
-        const unsubscribeUrl = smsUnsubscribeUrl(subscriptionId);
-        if (!unsubscribeUrl) continue;
-        payload = JSON.stringify({ title, body, zoneId: text(device, 'zone_id'), levelCm: input.levelCm, unsubscribeUrl });
-      } else {
-        payload = JSON.stringify({ title, body, zoneId: text(device, 'zone_id'), levelCm: input.levelCm, url: '/app' });
-      }
-      const dedupeKey = `${text(device, 'id')}:${input.pointId}:${input.state}:${target.channel}:${subscriptionId}`;
-      await executor.execute({ sql: `INSERT OR IGNORE INTO outbox_events(id,dedupe_key,tenant_id,zone_id,channel,recipient,payload_json,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,?,?,'PENDING',0,?,?)`, args: [id(), dedupeKey, text(device, 'tenant_id'), text(device, 'zone_id'), target.channel, target.recipient, payload, input.createdAt, input.createdAt] });
-    }
-  }
 }
 
 export async function insertAudit(input: { tenantId: string; actorId?: string | null; action: string; targetType: string; targetId?: string | null; metadata?: unknown; ipAddress?: string | null }, executor: Client | Transaction = requireTurso()) {

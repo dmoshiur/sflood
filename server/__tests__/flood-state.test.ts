@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { barrierForInputs, buzzerForState, floodStateForLevel } from '../../shared/flood-state.js';
 
 test('maps calibrated sample centimeters to documented flood states', () => {
-  assert.equal(floodStateForLevel(0), 'SAFE');
-  assert.equal(floodStateForLevel(19.99), 'SAFE');
+  assert.equal(floodStateForLevel(0), 'NORMAL');
+  assert.equal(floodStateForLevel(19.99), 'NORMAL');
   assert.equal(floodStateForLevel(20), 'WATCH');
   assert.equal(floodStateForLevel(34.99), 'WATCH');
   assert.equal(floodStateForLevel(35), 'WARNING');
@@ -16,7 +16,7 @@ test('maps calibrated sample centimeters to documented flood states', () => {
 });
 
 test('keeps local actuator policy cautious on sensor faults and latches raised barrier', () => {
-  assert.equal(buzzerForState('SAFE'), false);
+  assert.equal(buzzerForState('NORMAL'), false);
   assert.equal(buzzerForState('WATCH'), true);
   assert.equal(buzzerForState('CRITICAL'), true);
   assert.equal(barrierForInputs({ levelCm: 35, sensorHealthy: true, emergencyStopActive: false }), 'RAISED');

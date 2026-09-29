@@ -22,6 +22,9 @@ export interface DeviceSummary {
   signal: number;
   latestLevelCm: number | null;
   state: FloodState;
+  approvalState?: string;
+  limitSwitchState?: string | null;
+  faultState?: string | null;
 }
 
 export interface FloodEvent {
@@ -49,6 +52,7 @@ export interface DashboardPayload {
     trendCm: number;
     rainfallMm: number | null;
     seq: number;
+    rateOfRiseCmPerMin?: number;
   };
   stats: {
     activeDevices: number;

@@ -2,6 +2,10 @@
   FloodGuard · NodeMCU ESP8266 sender-only firmware (science-fair model only)
   No servo, motor, barrier or buzzer pins are defined on this node.
   Copy config.example.h to config.h and fill local credentials and the verified CA.
+
+  This node only reports sensor telemetry (level, rate of rise, health, RSSI,
+  uptime, firmware version, timestamp, sequence). It never receives or executes
+  barrier commands — the server refuses them for sender-kind devices as well.
 */
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
@@ -10,6 +14,8 @@
 #include <EEPROM.h>
 #include <math.h>
 #include "config.h"
+
+static const char *FG_FIRMWARE_VERSION = "0.3.0";
 
 constexpr uint8_t PIN_TRIG = D1;       // GPIO 5
 constexpr uint8_t PIN_ECHO = D2;       // GPIO 4; Echo MUST use 1kΩ series + 2kΩ to GND divider
@@ -23,7 +29,11 @@ constexpr int EEPROM_SEQ_ADDRESS = 0;
 uint32_t sequenceNumber = 916;
 uint32_t lastSampleAt = 0;
 float latestLevelCm = NAN;
+float previousLevelCm = NAN;
+uint32_t previousLevelAtMs = 0;
+float rateOfRiseCmPerMin = 0.0f;
 bool latestSensorHealthy = false;
+String deviceApiKey = FG_DEVICE_API_KEY; // replaced at runtime by provisioning when empty
 
 float readDistanceCm() {
   digitalWrite(PIN_TRIG, LOW);
@@ -48,7 +58,7 @@ bool readFilteredLevel(float &levelCm) {
   }
   if (count < 5) return false;
   for (uint8_t i = 1; i < count; i++) {
-    const float value = readings[i];
+    float value = readings[i];
     int j = i - 1;
     while (j >= 0 && readings[j] > value) { readings[j + 1] = readings[j]; j--; }
     readings[j + 1] = value;
@@ -66,8 +76,51 @@ void connectNetworkIfNeeded() {
   while (WiFi.status() != WL_CONNECTED && millis() - started < 8000) delay(200);
 }
 
+// Tiny JSON string extractor matching the platform's flat provisioning response.
+bool jsonExtractString(const String &body, const char *key, String &out) {
+  const String needle = String("\"") + key + "\":\"";
+  const int start = body.indexOf(needle);
+  if (start < 0) return false;
+  const int valueStart = start + needle.length();
+  const int valueEnd = body.indexOf('"', valueStart);
+  if (valueEnd < 0) return false;
+  out = body.substring(valueStart, valueEnd);
+  return true;
+}
+
+bool provisionDeviceIfNeeded() {
+  if (deviceApiKey.length() >= 16) return true;
+  if (strlen(FG_PROVISIONING_TOKEN) < 8) {
+    Serial.println("No device API key and no FG_PROVISIONING_TOKEN — telemetry disabled.");
+    return false;
+  }
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (strlen(FG_API_ROOT_CA) < 64) return false;
+  BearSSL::X509List rootCa(FG_API_ROOT_CA);
+  BearSSL::WiFiClientSecure client;
+  client.setTrustAnchors(&rootCa);
+  HTTPClient http;
+  if (!http.begin(client, FG_PROVISION_URL)) return false;
+  http.addHeader("Content-Type", "application/json");
+  char payload[256];
+  snprintf(payload, sizeof(payload), "{\"deviceId\":\"%s\",\"provisioningToken\":\"%s\",\"firmwareVersion\":\"%s\",\"kind\":\"ESP8266_SENDER\"}",
+    FG_DEVICE_ID, FG_PROVISIONING_TOKEN, FG_FIRMWARE_VERSION);
+  const int code = http.POST((uint8_t *)payload, strlen(payload));
+  const String response = http.getString();
+  http.end();
+  String apiKey;
+  if (code == 200 && jsonExtractString(response, "apiKey", apiKey) && apiKey.length() >= 16) {
+    deviceApiKey = apiKey; // kept in RAM; re-provision with a new token after a flash erase
+    Serial.println("Provisioning complete; per-device API key acquired.");
+    return true;
+  }
+  Serial.printf("Provisioning failed, HTTP %d\n", code);
+  return false;
+}
+
 bool postTelemetry() {
   if (WiFi.status() != WL_CONNECTED) return false;
+  if (!provisionDeviceIfNeeded()) return false;
   if (strlen(FG_API_ROOT_CA) < 64) {
     Serial.println("HTTPS disabled: add the verified API root CA to local config.h.");
     return false;
@@ -78,11 +131,15 @@ bool postTelemetry() {
   HTTPClient http;
   if (!http.begin(client, FG_API_URL)) return false;
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + FG_DEVICE_API_KEY);
-  char payload[230];
+  http.addHeader("Authorization", String("Bearer ") + deviceApiKey);
+  char payload[384];
   const float level = isfinite(latestLevelCm) ? latestLevelCm : 0.0f;
-  snprintf(payload, sizeof(payload), "{\"deviceId\":\"%s\",\"seq\":%lu,\"levelCm\":%.1f,\"sensorHealthy\":%s}",
-    FG_DEVICE_ID, (unsigned long)sequenceNumber, level, latestSensorHealthy ? "true" : "false");
+  snprintf(payload, sizeof(payload),
+    "{\"deviceId\":\"%s\",\"seq\":%lu,\"levelCm\":%.1f,\"rateOfRiseCmPerMin\":%.2f,\"sensorHealthy\":%s,"
+    "\"rssi\":%d,\"uptimeS\":%lu,\"firmwareVersion\":\"%s\",\"faultState\":\"%s\",\"timestamp\":\"%lu\"}",
+    FG_DEVICE_ID, (unsigned long)sequenceNumber, level, rateOfRiseCmPerMin, latestSensorHealthy ? "true" : "false",
+    WiFi.RSSI(), (unsigned long)(millis() / 1000), FG_FIRMWARE_VERSION,
+    latestSensorHealthy ? "" : "SENSOR", (unsigned long)millis());
   const int code = http.POST((uint8_t *)payload, strlen(payload));
   Serial.printf("telemetry HTTP %d · seq %lu\n", code, (unsigned long)sequenceNumber);
   http.end();
@@ -106,7 +163,19 @@ void loop() {
   if (millis() - lastSampleAt < SAMPLE_INTERVAL_MS) { delay(20); return; }
   lastSampleAt = millis();
   latestSensorHealthy = readFilteredLevel(latestLevelCm);
-  Serial.printf("sensor=%s level=%.1fcm seq=%lu\n", latestSensorHealthy ? "OK" : "UNKNOWN", isfinite(latestLevelCm) ? latestLevelCm : -1.0f, (unsigned long)sequenceNumber + 1);
+  const uint32_t nowMs = millis();
+  if (latestSensorHealthy && isfinite(latestLevelCm) && isfinite(previousLevelCm) && nowMs > previousLevelAtMs) {
+    const float minutes = (float)(nowMs - previousLevelAtMs) / 60000.0f;
+    rateOfRiseCmPerMin = minutes > 0.0f ? (latestLevelCm - previousLevelCm) / minutes : 0.0f;
+    previousLevelCm = latestLevelCm;
+    previousLevelAtMs = nowMs;
+  } else if (latestSensorHealthy && isfinite(latestLevelCm)) {
+    previousLevelCm = latestLevelCm;
+    previousLevelAtMs = nowMs;
+  }
+  Serial.printf("sensor=%s level=%.1fcm rate=%.2fcm/min seq=%lu\n",
+    latestSensorHealthy ? "OK" : "UNKNOWN", isfinite(latestLevelCm) ? latestLevelCm : -1.0f,
+    rateOfRiseCmPerMin, (unsigned long)sequenceNumber + 1);
   connectNetworkIfNeeded();
   sequenceNumber++;
   EEPROM.put(EEPROM_SEQ_ADDRESS, sequenceNumber); // persist before network send; avoids replay after restart

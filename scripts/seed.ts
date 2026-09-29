@@ -37,15 +37,15 @@ async function main() {
     const levels = [9.5, 11.1, 13.8, 12.9, 16.4, 19.7, 21.2, 24.5, 26.8, 29.3, 31.8, 34.2];
     for (let index = 0; index < levels.length; index += 1) {
       const levelCm = levels[index]!;
-      const state = levelCm >= 50 ? 'CRITICAL' : levelCm >= 35 ? 'WARNING' : levelCm >= 20 ? 'WATCH' : 'SAFE';
+      const state = levelCm >= 50 ? 'CRITICAL' : levelCm >= 35 ? 'WARNING' : levelCm >= 20 ? 'WATCH' : 'NORMAL';
       const createdAt = new Date(Date.now() - (levels.length - index - 1) * 10 * 60_000).toISOString();
-      await execute('INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,state,barrier_state,sensor_healthy,created_at) VALUES(?,?,?,?,?,?,?,1,?)', [randomId(), 'fg-esp32-01', index + 1, levelCm, Math.max(0, Math.round((index - 2) * 1.7)), state, 'DOWN', createdAt]);
+      await execute('INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,state,barrier_state,sensor_healthy,created_at,received_at) VALUES(?,?,?,?,?,?,?,1,?,?)', [randomId(), 'fg-esp32-01', index + 1, levelCm, Math.max(0, Math.round((index - 2) * 1.7)), state, 'DOWN', createdAt, createdAt]);
     }
     await execute("UPDATE devices SET last_seq=12,last_seen_at=?,current_state='WATCH',barrier_state='DOWN',updated_at=? WHERE id='fg-esp32-01'", [now, now]);
   }
   const senderCount = await execute('SELECT COUNT(*) AS count FROM telemetry WHERE device_id=?', ['fg-esp8266-01']);
   if (Number(senderCount.rows[0]?.count || 0) === 0) {
-    await execute('INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,state,barrier_state,sensor_healthy,created_at) VALUES(?,?,1,29.6,24,\'WATCH\',\'DOWN\',1,?)', [randomId(), 'fg-esp8266-01', now]);
+    await execute('INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,state,barrier_state,sensor_healthy,created_at,received_at) VALUES(?,?,1,29.6,24,\'WATCH\',\'DOWN\',1,?,?)', [randomId(), 'fg-esp8266-01', now, now]);
     await execute("UPDATE devices SET last_seq=1,last_seen_at=?,current_state='WATCH',updated_at=? WHERE id='fg-esp8266-01'", [now, now]);
   }
   await execute('INSERT INTO firmware_releases(id,version,sha256,size_bytes,asset_url,channel,notes,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(version) DO NOTHING', [randomId(), '0.1.0-demo', 'not-published', 0, '', 'demo', 'No firmware binary is published by this preview.', now]);

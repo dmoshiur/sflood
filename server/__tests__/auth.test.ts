@@ -92,7 +92,10 @@ test('bootstrap, MFA, CSRF and provider-secret redaction protect Hackeradmin', a
   assert.match(cookies, /fg_session=.*fg_csrf=/);
   const csrf = bootBody.csrfToken as string;
 
-  const blockedBeforeMfa = await post('/api/owner/providers/smtp', { host: 'smtp.example.test' }, cookies, csrf);
+  const blockedBeforeMfa = await fetch(`${baseUrl}/api/owner/providers/smtp`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookies, 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ host: 'smtp.example.test' }),
+  });
   assert.equal(blockedBeforeMfa.status, 403);
   assert.match((await blockedBeforeMfa.json()).error, /authenticator/i);
 
