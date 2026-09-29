@@ -441,6 +441,9 @@ static void applyLocalPolicy() {
  * Telemetry, commands, heartbeat
  * ------------------------------------------------------------------ */
 
+/* Defined below the polling loop; declared here so the order reads top-down. */
+static void acknowledgeCommand(const String& commandId, const char* result, const char* error);
+
 static void sendTelemetry() {
   if (!wifiReady) return;
   sequenceNumber += 1;
@@ -521,7 +524,7 @@ static void pollCommands() {
   }
 }
 
-static void acknowledgeCommand(const String& commandId, const char* result, const char& error) {
+static void acknowledgeCommand(const String& commandId, const char* result, const char* error) {
   String body = "{\"commandId\":\"" + commandId + "\",";
   body += "\"status\":\"" + String(result) + "\",";
   body += "\"barrierState\":\"" + String(barrierName(status.barrier)) + "\",";
