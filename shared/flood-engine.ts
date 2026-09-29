@@ -14,7 +14,7 @@
  *  - optional multi-sensor confirmation before escalating (N of M within a window).
  *
  * This module is intentionally pure (no I/O) so it can be unit-tested and shared
- * by the server, the simulation mode and the firmware design documents.
+ * by the server and firmware design documents.
  */
 
 export type FloodEngineState = 'NORMAL' | 'WATCH' | 'WARNING' | 'CRITICAL' | 'RECOVERY';

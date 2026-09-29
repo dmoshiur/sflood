@@ -238,6 +238,14 @@ export async function evaluateAndRecord(input: EngineEvaluationInput): Promise<E
         suppressed ? 1 : 0, input.simulation ? 1 : 0, new Date(now).toISOString(),
       ],
     );
+    if (!suppressed && ['WATCH', 'WARNING', 'CRITICAL'].includes(evaluation.state)) {
+      const severity = evaluation.state as 'WATCH' | 'WARNING' | 'CRITICAL';
+      const thresholds: Record<'WATCH' | 'WARNING' | 'CRITICAL', number> = { WATCH: config.watchCm, WARNING: config.warningCm, CRITICAL: config.criticalCm };
+      const alertId = randomId();
+      const alertMessage = `${title}: ${input.levelCm?.toFixed(1) ?? '—'} cm water level.`;
+      const timestamp = new Date(now).toISOString();
+      await execute('INSERT INTO alerts(id,tenant_id,device_id,type,severity,message,water_level,threshold,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', [alertId, input.tenantId, input.deviceId, `FLOOD_${severity}`, severity, alertMessage, input.levelCm, thresholds[severity], timestamp, timestamp]);
+    }
     await insertAudit({
       tenantId: input.tenantId,
       action: 'FLOOD_STATE_TRANSITION',
@@ -257,7 +265,7 @@ export async function evaluateAndRecord(input: EngineEvaluationInput): Promise<E
       });
     }
 
-    // Barrier automation (real deployments only; simulation never commands hardware).
+    // Only live, accepted backend state may trigger the configured barrier policy.
     if (!input.simulation && evaluation.barrierPolicy !== 'HOLD') {
       const shouldRaise = evaluation.barrierPolicy === 'RAISE'
         && ((evaluation.state === 'WARNING' && policy.autoBarrierOnWarning) || (evaluation.state === 'CRITICAL' && policy.autoBarrierOnCritical));

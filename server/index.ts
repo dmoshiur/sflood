@@ -6,16 +6,14 @@ import { fileURLToPath } from 'node:url';
 import express, { type ErrorRequestHandler } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { z } from 'zod';
-import { barrierForInputs, floodStateForLevel, normalizeFloodState } from '../shared/flood-state.js';
+import { floodStateForLevel, normalizeFloodState } from '../shared/flood-state.js';
 import type { FloodState } from '../shared/flood-state.js';
-import type { FloodEvent } from '../shared/types.js';
-import { createFreshPreviewStore, currentPreviewState, getPreviewDashboard, makeTelemetryPoint, readStore, writeStore } from './data.js';
 import {
   connectDatabase, migrateDatabase, getTursoDashboard, getTursoDeviceCredential, getTursoDeviceDetail,
-  getTursoDevices, getTursoHistory, ingestTursoTelemetry, isTursoConfigured,
-  DatabaseRequestError, execute, randomId, currentTimestamp, rowText, rowBoolean,
+  getTursoDevices, getTursoHistory, getTursoDeviceReadings, ingestTursoTelemetry, isTursoConfigured,
+  DatabaseRequestError, execute, randomId, currentTimestamp, rowText, rowBoolean, rowNumber,
 } from './database.js';
-import { authRouter, ownerRouter, opsRouter } from './auth.js';
+import { authRouter, ownerRouter, opsRouter, requireSession, requireAdmin, requireCsrf, type AuthUser } from './auth.js';
 import './admin.js';
 import './admin-extra.js';
 import { publicRouter, deviceRouter } from './public-api.js';
@@ -32,7 +30,6 @@ const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(moduleDirectory, '..');
 const distDirectory = path.join(projectRoot, 'dist');
 const apiLimiter = rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false });
-const simulatorLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
 const telemetryLimiter = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: 'draft-8', legacyHeaders: false });
 const subscriptionLimiter = rateLimit({ windowMs: 60 * 60_000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false });
 const smsRecipientLimiter = rateLimit({
@@ -63,13 +60,11 @@ app.use('/api/profile', profileRouter);
 app.use('/api/public', publicRouter);
 app.use('/api/v1', deviceRouter);
 
-const simulateSchema = z.object({
-  action: z.enum(['rise', 'recede', 'sensor-fault', 'sensor-recovered', 'estop', 'estop-reset', 'reset']),
-});
 const telemetrySchema = z.object({
   deviceId: z.string().min(3).max(64),
   seq: z.number().int().nonnegative(),
   levelCm: z.number().finite().min(0).max(500),
+  distanceCm: z.number().finite().min(0).max(500).optional(),
   rainfallMm: z.number().finite().min(0).max(1000).optional(),
   rateOfRiseCmPerMin: z.number().finite().min(-100).max(100).optional(),
   sensorHealthy: z.boolean().optional().default(true),
@@ -113,186 +108,112 @@ function isReportedStateConsistent(state: string | undefined, levelCm: number, s
   return bands[normalized as keyof typeof bands](levelCm);
 }
 
-function eventForState(state: FloodState, previous: FloodState): FloodEvent | null {
-  if (state === previous) return null;
-  const createdAt = new Date().toISOString();
-  const messages: Record<FloodState, { title: string; message: string }> = {
-    NORMAL: { title: 'Level returned to NORMAL', message: 'The simulated reading is below 20 cm. Keep monitoring local conditions.' },
-    RECOVERY: { title: 'Recovery in progress', message: 'The simulated level is receding. NORMAL resumes after the recovery cooldown.' },
-    WATCH: { title: 'WATCH threshold reached', message: 'Sample water level is 20–34 cm. The buzzer pattern is set to chirp in the demo.' },
-    WARNING: { title: 'WARNING threshold reached', message: 'Sample water level is 35–49 cm. Barrier-raise logic is active in simulation.' },
-    CRITICAL: { title: 'CRITICAL threshold reached', message: 'Sample water level is 50 cm or higher. The demo barrier remains latched raised.' },
-    UNKNOWN: { title: 'Sensor reading UNKNOWN', message: 'A sensor fault was simulated. The barrier holds its last safe position.' },
-    FAULT: { title: 'System entered FAULT', message: 'The emergency-stop simulation is active. Actuation is inhibited.' },
-  };
-  return { id: crypto.randomUUID(), title: messages[state].title, message: messages[state].message, state, createdAt };
-}
-
-function appendTelemetry(
-  store: ReturnType<typeof readStore>,
-  deviceId: string,
-  seq: number,
-  levelCm: number,
-  sensorHealthy: boolean,
-  rainfallMm?: number,
-  previousStateOverride?: FloodState,
-  forcedState?: FloodState,
-) {
-  const previousState = previousStateOverride ?? currentPreviewState(store);
-  let nextState = forcedState ?? (store.emergencyStopActive ? 'FAULT' : sensorHealthy ? floodStateForLevel(levelCm) : 'UNKNOWN');
-  // Demonstrate the RECOVERY workflow: receding from an alert state passes
-  // through RECOVERY until the level is below the recovery threshold (15 cm).
-  if (!forcedState && sensorHealthy && !store.emergencyStopActive && nextState === 'NORMAL'
-    && ['WATCH', 'WARNING', 'CRITICAL', 'RECOVERY'].includes(previousState)) {
-    nextState = levelCm > 15 ? 'RECOVERY' : 'NORMAL';
-    if (previousState === 'RECOVERY' && levelCm > 15) nextState = 'RECOVERY';
-  }
-  const previousBarrier = store.barrier;
-
-  store.sensorHealthy = sensorHealthy;
-  store.levelCm = levelCm;
-  if (rainfallMm !== undefined) store.rainfallMm = rainfallMm;
-  store.barrier = store.emergencyStopActive
-    ? 'FAULT'
-    : barrierForInputs({ levelCm, sensorHealthy, emergencyStopActive: false }, previousBarrier, store.barrierLatched);
-
-  if (nextState === 'WARNING' || nextState === 'CRITICAL') {
-    store.barrier = 'RAISED';
-    store.barrierLatched = true;
-  }
-  if (nextState === 'UNKNOWN' && previousBarrier === 'RAISED') store.barrier = 'HOLD';
-  if (nextState === 'RECOVERY' && (previousBarrier === 'RAISED' || previousBarrier === 'HOLD')) { store.barrier = 'RAISED'; store.barrierLatched = true; }
-  if (nextState === 'NORMAL' && previousState === 'RECOVERY') { store.barrier = 'DOWN'; store.barrierLatched = false; }
-
-  const point = makeTelemetryPoint({
-    deviceId,
-    seq,
-    levelCm,
-    rainfallMm: rainfallMm ?? null,
-    state: nextState,
-    sensorHealthy,
-  });
-  store.history.push(point);
-  store.history = store.history.slice(-1000);
-  const device = store.devices.find((item) => item.id === deviceId);
-  if (device) {
-    device.lastSeq = seq;
-    device.latestLevelCm = levelCm;
-    device.state = nextState;
-    device.lastSeenAt = point.createdAt;
-  }
-  const event = eventForState(nextState, previousState);
-  if (event) {
-    store.events.unshift(event);
-    store.events = store.events.slice(0, 100);
-    if (nextState === 'WARNING' || nextState === 'CRITICAL') {
-      const notificationPayload = { title: event.title, body: event.message, zone: store.zone, levelCm, url: '/app' };
-      for (const subscription of store.pushSubscriptions.filter((item) => item.zone === store.zone)) {
-        const dedupeKey = `${deviceId}:${seq}:${nextState}:WEB_PUSH:${hashToken(subscription.endpoint)}`;
-        store.outbox.unshift({ id: crypto.randomUUID(), dedupeKey, channel: 'WEB_PUSH', recipient: subscription.endpoint, payload: notificationPayload, status: 'PENDING', attempts: 0, nextAttemptAt: point.createdAt, createdAt: point.createdAt });
-      }
-      for (const subscription of store.emailSubscriptions.filter((item) => item.zone === store.zone && item.verifiedAt && !item.unsubscribedAt)) {
-        const dedupeKey = `${deviceId}:${seq}:${nextState}:EMAIL:${hashToken(subscription.email)}`;
-        store.outbox.unshift({ id: crypto.randomUUID(), dedupeKey, channel: 'EMAIL', recipient: subscription.email, payload: notificationPayload, status: 'PENDING', attempts: 0, nextAttemptAt: point.createdAt, createdAt: point.createdAt });
-      }
-    }
-  }
-  return { point, previousState, nextState, event };
-}
-
 let databaseReady = false;
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'floodguard-api', mode: isTursoConfigured ? 'turso' : 'simulation', databaseReady: databaseReady, now: new Date().toISOString() });
+app.get('/api/health', async (_req, res) => {
+  let connected = false;
+  if (isTursoConfigured) { try { await connectDatabase(); connected = true; } catch (error) { console.error('[health] Turso health check failed:', error); } }
+  const status = connected ? 200 : 503;
+  res.status(status).json({ success: connected, status: connected ? 'ok' : 'unavailable', database: connected ? 'connected' : 'disconnected', timestamp: new Date().toISOString() });
 });
 
 app.get('/api/health/ready', async (_req, res) => {
-  if (!isTursoConfigured) {
-    res.json({ ready: true, mode: 'simulation', note: 'Local simulation mode; no database required.' });
-    return;
-  }
-  res.json({ ready: databaseReady, mode: 'turso', databaseReady });
+  let connected = false;
+  if (isTursoConfigured) { try { connected = await connectDatabase(); } catch (error) { console.error('[health/ready] Turso query failed:', error); } }
+  res.status(connected && databaseReady ? 200 : 503).json({ ready: connected && databaseReady, database: connected ? 'connected' : 'disconnected', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/dashboard', async (_req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  res.json(isTursoConfigured ? await getTursoDashboard() : getPreviewDashboard(readStore()));
-});
-
-app.get('/api/history', async (req, res) => {
-  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 36));
-  res.setHeader('Cache-Control', 'no-store');
-  const history = isTursoConfigured ? await getTursoHistory(limit) : readStore().history.slice(-limit);
-  res.json({ history, mode: isTursoConfigured ? 'turso' : 'simulation' });
-});
-
-app.get('/api/devices', async (_req, res) => {
-  if (isTursoConfigured) { res.json({ devices: await getTursoDevices(), mode: 'turso' }); return; }
-  const { devices } = getPreviewDashboard(readStore());
-  res.json({ devices, mode: 'simulation' });
-});
-
-app.get('/api/devices/:deviceId', async (req, res) => {
-  if (isTursoConfigured) {
-    const detail = await getTursoDeviceDetail(req.params.deviceId);
-    if (!detail) { res.status(404).json({ error: 'Device not found.' }); return; }
-    res.json(detail); return;
-  }
-  const store = readStore();
-  const device = store.devices.find((item) => item.id === req.params.deviceId);
-  if (!device) { res.status(404).json({ error: 'Device not found.' }); return; }
-  const dashboard = getPreviewDashboard(store);
-  res.json({ device: dashboard.devices.find((item) => item.id === device.id), history: store.history.filter((point) => point.deviceId === device.id).slice(-80) });
-});
-
-app.post('/api/demo/simulate', simulatorLimiter, (req, res, next) => {
-  if (isTursoConfigured) { res.status(409).json({ error: 'Simulation controls are disabled when Turso telemetry is active.' }); return; }
-  const parsed = simulateSchema.safeParse(req.body);
-  if (!parsed.success) { res.status(400).json({ error: 'Choose a supported demo simulation action.' }); return; }
+const deviceRegistrationSchema = z.object({ id: z.string().min(3).max(64).regex(/^[a-z0-9][a-z0-9-]+$/), name: z.string().trim().min(2).max(80), kind: z.enum(['ESP32_CONTROLLER', 'ESP8266_SENDER']), zoneId: z.string().min(3).max(64) });
+app.post('/api/v1/devices/register', requireSession, requireAdmin, requireCsrf, async (req, res, next) => {
+  const parsed = deviceRegistrationSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: { code: 'INVALID_DEVICE', message: parsed.error.issues[0]?.message || 'Invalid device registration.' } }); return; }
+  const user = res.locals.authUser as AuthUser;
   try {
-    const store = readStore();
-    const currentDevice = store.devices.find((item) => item.id === 'fg-esp32-01');
-    if (!currentDevice) { res.status(503).json({ error: 'Demo controller is unavailable.' }); return; }
-    const action = parsed.data.action;
-    const previousState = currentPreviewState(store);
-    if (action === 'reset') {
-      const fresh = createFreshPreviewStore();
-      writeStore(fresh);
-      res.json({ dashboard: getPreviewDashboard(fresh), message: 'The simulation has been reset. No hardware command was sent.' });
-      return;
-    }
-
-    if (action === 'rise') store.levelCm = Math.min(500, store.levelCm + 5);
-    if (action === 'recede') store.levelCm = Math.max(0, store.levelCm - 6);
-    if (action === 'sensor-fault') store.sensorHealthy = false;
-    if (action === 'sensor-recovered') store.sensorHealthy = true;
-    if (action === 'estop') store.emergencyStopActive = true;
-    if (action === 'estop-reset') store.emergencyStopActive = false;
-
-    const nextSeq = currentDevice.lastSeq + 1;
-    const pointHealthy = store.sensorHealthy;
-    const result = appendTelemetry(
-      store,
-      currentDevice.id,
-      nextSeq,
-      store.levelCm,
-      pointHealthy,
-      store.rainfallMm,
-      previousState,
-      action === 'estop' ? 'FAULT' : undefined,
-    );
-    if (store.emergencyStopActive) store.barrier = 'FAULT';
-    else if (store.barrier === 'FAULT') store.barrier = store.barrierLatched ? 'RAISED' : 'DOWN';
-    writeStore(store);
-    const message = action === 'estop'
-      ? 'E-stop simulated: outputs are marked FAULT. This does not operate a physical switch.'
-      : action === 'sensor-fault'
-        ? 'Sensor fault simulated: state is UNKNOWN and the barrier holds position.'
-        : `${result.nextState} sample stored. No physical barrier or buzzer was operated.`;
-    res.json({ dashboard: getPreviewDashboard(store), message });
+    const zone = await execute('SELECT z.id,z.city_id FROM zones z JOIN cities c ON c.id=z.city_id WHERE z.id=? AND c.tenant_id=?', [parsed.data.zoneId, user.tenantId]);
+    if (!zone.rows.length) { res.status(404).json({ error: { code: 'ZONE_NOT_FOUND', message: 'Select a zone in your project.' } }); return; }
+    const cityId = rowText(zone.rows[0], 'city_id');
+    if (user.role === 'ADMIN' && user.cityId && user.cityId !== cityId) { res.status(403).json({ error: 'This device is outside your assigned city.' }); return; }
+    const now = currentTimestamp();
+    await execute(`INSERT INTO devices(id,tenant_id,city_id,zone_id,name,kind,api_key_hash,firmware_version,enabled,approval_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'unprovisioned',0,'PENDING',?,?)`, [parsed.data.id,user.tenantId,cityId,parsed.data.zoneId,parsed.data.name,parsed.data.kind,'not-provisioned',now,now]);
+    await execute('INSERT INTO activity_logs(id,tenant_id,actor_id,device_id,action,details_json,created_at) VALUES(?,?,?,?,?,?,?)', [randomId(),user.tenantId,user.id,parsed.data.id,'DEVICE_REGISTERED',JSON.stringify({kind:parsed.data.kind,zoneId:parsed.data.zoneId}),now]);
+    res.status(201).json({ success: true, data: { deviceId: parsed.data.id, approvalState: 'PENDING' } });
   } catch (error) { next(error); }
 });
 
-app.post('/api/v1/telemetry', telemetryLimiter, async (req, res, next) => {
+app.get('/api/dashboard', requireSession, async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'FloodGuard data is unavailable until Turso is configured.' } }); return; }
+  const tenantId = String(res.locals.authUser?.tenantId || '');
+  res.json(await getTursoDashboard(tenantId));
+});
+
+app.get('/api/history', requireSession, async (req, res) => {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+  const from = typeof req.query.from === 'string' && Number.isFinite(Date.parse(req.query.from)) ? new Date(req.query.from).toISOString() : undefined;
+  const to = typeof req.query.to === 'string' && Number.isFinite(Date.parse(req.query.to)) ? new Date(req.query.to).toISOString() : undefined;
+  const deviceId = typeof req.query.deviceId === 'string' && req.query.deviceId.length <= 64 ? req.query.deviceId : undefined;
+  res.setHeader('Cache-Control', 'no-store');
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Historical telemetry requires a Turso connection.' } }); return; }
+  if (from && to && from > to) { res.status(400).json({ error: { code: 'INVALID_DATE_RANGE', message: 'The start date must be before the end date.' } }); return; }
+  const history = await getTursoHistory(limit, String(res.locals.authUser?.tenantId || ''), deviceId, from, to);
+  res.json({ history });
+});
+
+app.get('/api/devices', requireSession, async (_req, res) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Device registry requires a Turso connection.' } }); return; }
+  res.json({ devices: await getTursoDevices(String(res.locals.authUser?.tenantId || '')) });
+});
+
+
+app.get('/api/devices/:deviceId/status', requireSession, async (req, res, next) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Device status requires Turso.' } }); return; }
+  try {
+    const detail = await getTursoDeviceDetail(String(req.params.deviceId), String(res.locals.authUser?.tenantId || ''));
+    if (!detail) { res.status(404).json({ error: { code: 'DEVICE_NOT_FOUND', message: 'The requested device does not exist.' } }); return; }
+    res.json({ status: detail.device, latestReading: detail.history.at(-1) ?? null });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/devices/:deviceId/readings', requireSession, async (req, res, next) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Device readings require Turso.' } }); return; }
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+  const from = typeof req.query.from === 'string' && Number.isFinite(Date.parse(req.query.from)) ? new Date(req.query.from).toISOString() : undefined;
+  const to = typeof req.query.to === 'string' && Number.isFinite(Date.parse(req.query.to)) ? new Date(req.query.to).toISOString() : undefined;
+  if (from && to && from > to) { res.status(400).json({ error: { code: 'INVALID_DATE_RANGE', message: 'The start date must be before the end date.' } }); return; }
+  try {
+    const readings = await getTursoDeviceReadings(String(req.params.deviceId), String(res.locals.authUser?.tenantId || ''), limit, from, to);
+    if (!readings) { res.status(404).json({ error: { code: 'DEVICE_NOT_FOUND', message: 'The requested device does not exist.' } }); return; }
+    res.json({ readings });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/alerts', requireSession, async (_req, res, next) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Alerts require Turso.' } }); return; }
+  try {
+    const result = await execute('SELECT id,type,severity,message,device_id,water_level,threshold,acknowledged_at,created_at FROM alerts WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200', [String(res.locals.authUser?.tenantId || '')]);
+    res.json({ alerts: result.rows.map((raw) => ({ id: rowText(raw, 'id'), type: rowText(raw, 'type'), severity: rowText(raw, 'severity'), message: rowText(raw, 'message'), deviceId: rowText(raw, 'device_id') || null, waterLevel: rowNumber(raw, 'water_level', NaN), threshold: rowNumber(raw, 'threshold', NaN), acknowledgedAt: rowText(raw, 'acknowledged_at') || null, createdAt: rowText(raw, 'created_at') })) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/alerts/:alertId/acknowledge', requireSession, async (req, res, next) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Alert acknowledgement requires Turso.' } }); return; }
+  try {
+    const user = res.locals.authUser;
+    const now = currentTimestamp();
+    const updated = await execute('UPDATE alerts SET acknowledged_at=?,acknowledged_by=?,updated_at=? WHERE id=? AND tenant_id=? AND acknowledged_at IS NULL', [now, user.id, now, String(req.params.alertId), user.tenantId]);
+    if (!updated.rowsAffected) { res.status(404).json({ error: { code: 'ALERT_NOT_FOUND_OR_ACKNOWLEDGED', message: 'The alert was not found or has already been acknowledged.' } }); return; }
+    await execute('INSERT INTO activity_logs(id,tenant_id,actor_id,action,details_json,created_at) VALUES(?,?,?,?,?,?)', [randomId(), user.tenantId, user.id, 'ALERT_ACKNOWLEDGED', JSON.stringify({ alertId: String(req.params.alertId) }), now]);
+    res.json({ acknowledged: true, acknowledgedAt: now });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/devices/:deviceId', requireSession, async (req, res) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Device records require a Turso connection.' } }); return; }
+  const detail = await getTursoDeviceDetail(String(req.params.deviceId), String(res.locals.authUser?.tenantId || ''));
+  if (!detail) { res.status(404).json({ error: { code: 'DEVICE_NOT_FOUND', message: 'The requested device does not exist.' } }); return; }
+  res.json(detail);
+});
+
+const telemetryHandler = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const parsed = telemetrySchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid telemetry payload.' }); return; }
   const reportedState: FloodState = parsed.data.state
@@ -305,7 +226,8 @@ app.post('/api/v1/telemetry', telemetryLimiter, async (req, res, next) => {
   const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
   if (!token || token.length < 16) { res.status(401).json({ error: 'A device bearer token is required.' }); return; }
 
-  if (isTursoConfigured) {
+  if (!isTursoConfigured) { res.status(503).json({ error: { code: 'DATABASE_NOT_CONFIGURED', message: 'Device telemetry ingestion is unavailable until Turso is configured.' } }); return; }
+  try {
     const device = await getTursoDeviceCredential(parsed.data.deviceId);
     if (!device || !rowBoolean(device, 'enabled') || !safeEqualHex(hashToken(token), rowText(device, 'api_key_hash'))) { res.status(401).json({ error: 'Device credentials are invalid.' }); return; }
     const isController = rowText(device, 'kind') === 'ESP32_CONTROLLER';
@@ -318,6 +240,7 @@ app.post('/api/v1/telemetry', telemetryLimiter, async (req, res, next) => {
       deviceId: parsed.data.deviceId,
       seq: parsed.data.seq,
       levelCm: parsed.data.levelCm,
+      distanceCm: parsed.data.distanceCm,
       rainfallMm: parsed.data.rainfallMm,
       sensorHealthy: parsed.data.sensorHealthy,
       deviceState: reportedState,
@@ -331,31 +254,16 @@ app.post('/api/v1/telemetry', telemetryLimiter, async (req, res, next) => {
       limitSwitchState: parsed.data.limitSwitchState ?? null,
       reportedAt: parsed.data.timestamp ?? null,
     });
-    res.status(202).json({ accepted: true, ...result, note: 'Telemetry accepted and stored; barrier automation follows the configured policy with local fail-safe priority.' });
+    res.status(202).json({ success: true, data: { accepted: true, serverTime: currentTimestamp(), ...result }, accepted: true, ...result, note: 'Telemetry accepted and stored; barrier automation follows the configured policy with local fail-safe priority.' });
     return;
-  }
-
-  try {
-    const store = readStore();
-    const device = store.devices.find((item) => item.id === parsed.data.deviceId && item.enabled);
-    if (!device || !safeEqualHex(hashToken(token), device.apiKeyHash)) { res.status(401).json({ error: 'Device credentials are invalid.' }); return; }
-    if (parsed.data.seq <= device.lastSeq) { res.status(409).json({ error: 'Sequence number was already received or is out of order.' }); return; }
-    const isController = device.kind === 'ESP32 controller';
-    if (!isController && (parsed.data.state || parsed.data.barrierState || parsed.data.emergencyStopActive)) { res.status(400).json({ error: 'Sender-only devices cannot report actuator or emergency-stop state.' }); return; }
-    if (!isReportedStateConsistent(parsed.data.state, parsed.data.levelCm, parsed.data.sensorHealthy, parsed.data.emergencyStopActive)) { res.status(400).json({ error: 'Reported state conflicts with the sensor health or calibrated level.' }); return; }
-    if (parsed.data.emergencyStopActive && parsed.data.barrierState && parsed.data.barrierState !== 'FAULT') { res.status(400).json({ error: 'An active E-stop must report actuator state FAULT.' }); return; }
-    if (reportedState === 'UNKNOWN' && parsed.data.barrierState && parsed.data.barrierState !== 'HOLD') { res.status(400).json({ error: 'A sensor fault must hold the last actuator position.' }); return; }
-    if ((reportedState === 'WARNING' || reportedState === 'CRITICAL') && parsed.data.barrierState && !['RAISED', 'RAISING'].includes(parsed.data.barrierState)) { res.status(400).json({ error: 'WARNING/CRITICAL telemetry cannot report a lowered barrier.' }); return; }
-    const previousState = currentPreviewState(store);
-    store.emergencyStopActive = parsed.data.emergencyStopActive;
-    const result = appendTelemetry(store, device.id, parsed.data.seq, parsed.data.levelCm, parsed.data.sensorHealthy, parsed.data.rainfallMm, previousState, reportedState);
-    if (parsed.data.barrierState) store.barrier = parsed.data.barrierState;
-    if (parsed.data.barrierState === 'DOWN') store.barrierLatched = false;
-    if (store.emergencyStopActive) store.barrier = 'FAULT';
-    if (result.nextState === 'WARNING' || result.nextState === 'CRITICAL' || parsed.data.barrierState === 'RAISED' || parsed.data.barrierState === 'RAISING') store.barrierLatched = true;
-    writeStore(store);
-    res.status(202).json({ accepted: true, seq: result.point.seq, state: result.nextState, barrier: store.barrier, note: 'Telemetry accepted. The server does not issue motor commands.' });
   } catch (error) { next(error); }
+};
+app.post('/api/v1/telemetry', telemetryLimiter, telemetryHandler);
+app.post('/api/v1/devices/:deviceId/telemetry', telemetryLimiter, (req, res, next) => {
+  const body = req.body || {};
+  const barrier = String(body.barrierState || '').toLowerCase();
+  req.body = { ...body, deviceId: req.params.deviceId, levelCm: body.levelCm ?? body.waterLevel, distanceCm: body.distanceCm ?? body.distance, sensorHealthy: body.sensorHealthy ?? (String(body.sensorStatus || '').toLowerCase() === 'ok'), barrierState: ({ closed: 'DOWN', open: 'RAISED', opening: 'RAISING', fault: 'FAULT', hold: 'HOLD' } as Record<string,string>)[barrier] || body.barrierState };
+  void telemetryHandler(req, res, next);
 });
 
 app.get('/api/notifications/config', async (_req, res, next) => {
@@ -368,6 +276,7 @@ app.get('/api/notifications/config', async (_req, res, next) => {
 app.post('/api/notifications/push', subscriptionLimiter, async (req, res, next) => {
   const parsed = pushSubscriptionSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'Explicit notification consent and a supported browser push subscription are required.' }); return; }
+  if (!isTursoConfigured) { res.status(503).json({ error: 'Notifications require a configured Turso database.' }); return; }
   try {
     const config = await notificationConfig();
     if (!config.webPushAvailable) { res.status(503).json({ error: 'Web Push is not configured for this deployment.' }); return; }
@@ -385,12 +294,6 @@ app.post('/api/notifications/push', subscriptionLimiter, async (req, res, next) 
       [id, String(device.tenant_id), String(device.zone_id), endpoint, keys.p256dh, keys.auth, consentAt, consentAt]);
       const zone = await execute('SELECT name FROM zones WHERE id=?', [String(device.zone_id)]);
       if (zone.rows.length) zoneLabel = String((zone.rows[0] as Record<string, unknown>).name);
-    } else {
-      const store = readStore();
-      zoneLabel = store.zone;
-      store.pushSubscriptions = store.pushSubscriptions.filter((item) => item.endpoint !== endpoint);
-      store.pushSubscriptions.push({ endpoint, p256dh: keys.p256dh, auth: keys.auth, zone: store.zone, consentAt });
-      writeStore(store);
     }
     res.status(201).json({ saved: true, zone: zoneLabel, message: 'Browser push is enabled for this zone. You can unsubscribe in the browser or from this device.' });
   } catch (error) { next(error); }
@@ -399,13 +302,9 @@ app.post('/api/notifications/push', subscriptionLimiter, async (req, res, next) 
 app.delete('/api/notifications/push', subscriptionLimiter, async (req, res, next) => {
   const parsed = pushUnsubscribeSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'A valid push endpoint is required.' }); return; }
+  if (!isTursoConfigured) { res.status(503).json({ error: 'Notifications require a configured Turso database.' }); return; }
   try {
-    if (isTursoConfigured) await execute('UPDATE subscriptions SET unsubscribed_at=? WHERE push_endpoint=? AND unsubscribed_at IS NULL', [currentTimestamp(), parsed.data.endpoint]);
-    else {
-      const store = readStore();
-      store.pushSubscriptions = store.pushSubscriptions.filter((item) => item.endpoint !== parsed.data.endpoint);
-      writeStore(store);
-    }
+    await execute('UPDATE subscriptions SET unsubscribed_at=? WHERE push_endpoint=? AND unsubscribed_at IS NULL', [currentTimestamp(), parsed.data.endpoint]);
     res.json({ removed: true });
   } catch (error) { next(error); }
 });
@@ -413,6 +312,7 @@ app.delete('/api/notifications/push', subscriptionLimiter, async (req, res, next
 app.post('/api/notifications/email', subscriptionLimiter, async (req, res, next) => {
   const parsed = emailSubscriptionSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'A valid email and explicit consent are required.' }); return; }
+  if (!isTursoConfigured) { res.status(503).json({ error: 'Email subscriptions require a configured Turso database.' }); return; }
   try {
     const email = parsed.data.email;
     const rawToken = crypto.randomBytes(32).toString('base64url');
@@ -438,12 +338,6 @@ app.post('/api/notifications/email', subscriptionLimiter, async (req, res, next)
       [subscriptionId, String(device.tenant_id), String(device.zone_id), email, now, verificationHash, verificationExpiresAt, unsubscribeHash]);
       if (config.emailAvailable) await execute(`INSERT OR IGNORE INTO outbox_events(id,dedupe_key,tenant_id,zone_id,channel,recipient,payload_json,status,attempts,next_attempt_at,created_at)
         VALUES(?,?,?,?,? ,?,?, 'PENDING',0,?,?)`, [randomId(), `email-opt-in:${subscriptionId}:${verificationHash}`, String(device.tenant_id), String(device.zone_id), 'EMAIL', email, JSON.stringify(payload), now, now]);
-    } else {
-      const store = readStore();
-      const existing = store.emailSubscriptions.find((item) => item.email === email && item.zone === store.zone && !item.unsubscribedAt);
-      if (existing) { existing.tokenHash = verificationHash; existing.unsubscribeTokenHash = unsubscribeHash; existing.consentAt = now; existing.verifiedAt = null; }
-      else store.emailSubscriptions.push({ email, tokenHash: verificationHash, unsubscribeTokenHash: unsubscribeHash, zone: store.zone, consentAt: now, verifiedAt: null, unsubscribedAt: null });
-      writeStore(store);
     }
     res.status(202).json({ pending: true, verificationEmailQueued: config.emailAvailable, message: config.emailAvailable ? 'Please check your email and confirm your subscription.' : 'Consent saved as pending. SMTP is not configured, so no confirmation message was sent.' });
   } catch (error) { next(error); }
@@ -500,46 +394,39 @@ app.post('/api/notifications/sms/verify', subscriptionLimiter, async (req, res, 
 app.get('/api/notifications/verify', async (req, res, next) => {
   const token = typeof req.query.token === 'string' ? req.query.token : '';
   if (token.length < 32 || token.length > 128) { res.status(400).type('text').send('Invalid or expired verification link.'); return; }
+  if (!isTursoConfigured) { res.status(503).type('text').send('Database-backed verification is unavailable.'); return; }
   try {
     const tokenHash = hashToken(token);
     if (isTursoConfigured) {
       const result = await execute('UPDATE subscriptions SET verified_at=?,verification_token_hash=NULL,verification_expires_at=NULL WHERE verification_token_hash=? AND verification_expires_at>? AND unsubscribed_at IS NULL', [currentTimestamp(), tokenHash, currentTimestamp()]);
       if (!result.rowsAffected) { res.status(400).type('text').send('Invalid or expired verification link.'); return; }
-    } else {
-      const store = readStore();
-      const subscription = store.emailSubscriptions.find((item) => item.tokenHash === tokenHash && !item.unsubscribedAt);
-      if (!subscription) { res.status(400).type('text').send('Invalid or expired verification link.'); return; }
-      subscription.verifiedAt = currentTimestamp(); subscription.tokenHash = ''; writeStore(store);
     }
-    res.status(200).type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>FloodGuard email verified</title><main style="font-family:system-ui;padding:2rem;max-width:40rem;margin:auto"><h1>Email confirmed</h1><p>Your opt-in is verified for this project zone. FloodGuard is an educational prototype, not an emergency warning service.</p><a href="/app">Open the demo dashboard</a></main>');
+    res.status(200).type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>FloodGuard email verified</title><main style="font-family:system-ui;padding:2rem;max-width:40rem;margin:auto"><h1>Email confirmed</h1><p>Your opt-in is verified for this project zone. FloodGuard is an educational prototype, not an emergency warning service.</p><a href="/app">Open the dashboard</a></main>');
   } catch (error) { next(error); }
 });
 
 app.get('/api/notifications/unsubscribe', async (req, res, next) => {
   const token = typeof req.query.token === 'string' ? req.query.token : '';
   if (token.length < 32 || token.length > 128) { res.status(400).type('text').send('Invalid unsubscribe link.'); return; }
+  if (!isTursoConfigured) { res.status(503).type('text').send('Database-backed unsubscribe is unavailable.'); return; }
   try {
     const tokenHash = hashToken(token);
     if (isTursoConfigured) {
       const result = await execute('UPDATE subscriptions SET unsubscribed_at=?,verification_token_hash=NULL,verification_expires_at=NULL,unsubscribe_token_hash=NULL,phone_verification_token_hash=NULL,phone_verification_expires_at=NULL WHERE unsubscribe_token_hash=? AND unsubscribed_at IS NULL', [currentTimestamp(), tokenHash]);
       if (!result.rowsAffected) { res.status(400).type('text').send('Invalid or already used unsubscribe link.'); return; }
-    } else {
-      const store = readStore();
-      const subscription = store.emailSubscriptions.find((item) => item.unsubscribeTokenHash === tokenHash && !item.unsubscribedAt);
-      if (!subscription) { res.status(400).type('text').send('Invalid or already used unsubscribe link.'); return; }
-      subscription.unsubscribedAt = currentTimestamp(); subscription.tokenHash = ''; subscription.unsubscribeTokenHash = ''; writeStore(store);
     }
     res.status(200).type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>FloodGuard updates stopped</title><main style="font-family:system-ui;padding:2rem;max-width:40rem;margin:auto"><h1>You are unsubscribed</h1><p>No more optional FloodGuard project updates will be sent through this subscription. Emergency alerts are not provided by this educational prototype.</p></main>');
   } catch (error) { next(error); }
 });
 
-app.get('/api/firmware/releases', (_req, res) => {
-  res.json({ releases: [{ version: '0.1.0-demo', channel: 'demo', sha256: 'not-published', sizeBytes: 0, assetUrl: null, note: 'Firmware binaries are not hosted by this preview.' }] });
+app.get('/api/firmware/releases', async (_req, res, next) => {
+  if (!isTursoConfigured) { res.status(503).json({ error: 'Firmware release metadata requires Turso.' }); return; }
+  try { const result = await execute('SELECT version,sha256,size_bytes,asset_url,channel,notes,created_at FROM firmware_releases ORDER BY created_at DESC'); res.json({ releases: result.rows }); } catch (error) { next(error); }
 });
 
 app.get('/api/owner/status', async (_req, res, next) => {
   try {
-    const maintenanceMode = isTursoConfigured ? (await getTursoDashboard()).maintenanceMode : readStore().maintenanceMode;
+    const maintenanceMode = isTursoConfigured ? (await getTursoDashboard()).maintenanceMode : false;
     const owners = isTursoConfigured ? await execute("SELECT COUNT(*) AS count FROM users WHERE role='OWNER' AND disabled_at IS NULL") : null;
     res.json({ available: isTursoConfigured, databaseReady, ownerCount: owners ? Number((owners.rows[0] as Record<string, unknown>).count || 0) : 0, maintenanceMode, reason: isTursoConfigured ? 'Turso-backed role checks, CSRF sessions, IP allowlisting and authenticator MFA protect privileged routes.' : 'Set Turso credentials and the one-time OWNER_BOOTSTRAP_TOKEN to initialize protected admin access.' });
   } catch (error) { next(error); }
@@ -574,7 +461,7 @@ async function startServer() {
       await connectDatabase();
       await migrateDatabase();
       databaseReady = true;
-      console.log('Turso connected and schema migrations applied. Run npm run db:seed once to create the demo tenant and sensor nodes.');
+      console.log('Turso connected and schema migrations applied. Register an actual device before expecting telemetry.');
     } catch (error) {
       console.error('[FloodGuard] Turso connection or schema migration failed. Check TURSO_DATABASE_URL, TURSO_AUTH_TOKEN and database permissions.', error);
       process.exitCode = 1;
@@ -584,9 +471,7 @@ async function startServer() {
   startNotificationWorker();
   const server = app.listen(port, host, () => {
     console.log(`FloodGuard API listening on http://${host}:${port}`);
-    console.log(isTursoConfigured
-      ? 'Turso mode: device telemetry only; remote actuator commands are not exposed.'
-      : 'SIMULATION MODE: sample telemetry only; no physical actuator or emergency alert service is connected.');
+    console.log('Production data mode: Turso-backed records only; no generated telemetry is enabled.');
   });
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => server.close(() => process.exit(0)));
@@ -595,4 +480,4 @@ async function startServer() {
 
 if (process.env.NODE_ENV !== 'test') void startServer();
 
-export { app, appendTelemetry, isIpAllowedByCidr, safeEqualHex, hashToken, isTrustedPushEndpoint };
+export { app, isIpAllowedByCidr, safeEqualHex, hashToken, isTrustedPushEndpoint };

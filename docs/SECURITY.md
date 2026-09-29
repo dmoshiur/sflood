@@ -30,7 +30,7 @@ This prototype takes its security controls seriously as an educational exercise.
 2. Never expose the ops credential in URLs, query strings, frontend JS, HTML, source, logs or error messages.
 3. Session and ops cookies are `HttpOnly`, `SameSite=Lax`, `Secure` in production and path-scoped.
 4. Tokens (verification, provisioning, device keys) are compared with timing-safe equality.
-5. Demo/seed keys are development-only placeholders.
+5. Device credentials are provisioned per device and must be stored securely; never reuse a real credential in tests, examples, or firmware templates.
 
 ## Production checklist (security)
 
@@ -40,5 +40,5 @@ This prototype takes its security controls seriously as an educational exercise.
 - [ ] HTTPS enforced end-to-end (`TRUST_PROXY=1` behind the Render proxy)
 - [ ] SMTP/SMS providers configured through the owner console and test-sent
 - [ ] TOTP MFA enabled for the owner account
-- [ ] Demo keys rotated and demo/seed data removed from production
+- [ ] No test accounts, test credentials, or test telemetry have been copied into production
 - [ ] `VITE_FIRMWARE_*` publish your real release URLs

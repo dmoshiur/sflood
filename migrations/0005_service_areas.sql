@@ -16,6 +16,6 @@ ON CONFLICT(country_code, city_name) DO NOTHING;
 INSERT INTO site_settings(key,value_json,updated_at) VALUES
   ('flood_engine_config','{"watchCm":20,"warningCm":35,"criticalCm":50,"recoveryCm":15,"hysteresisCm":3,"rateOfRiseWarningCmPerMin":2.5,"rateOfRiseCriticalCmPerMin":6,"recoveryCooldownSeconds":300,"stateCooldownSeconds":60,"duplicateEventWindowSeconds":900,"multiSensorConfirmations":1,"multiSensorWindowSeconds":120}',datetime('now')),
   ('automation_policy','{"autoBarrierOnWarning":true,"autoBarrierOnCritical":true,"autoLowerOnRecovery":false,"notifyEmailOnCritical":true,"notifySmsOnCritical":true,"notifyPushOnWarning":true,"notifyOnRecovery":true}',datetime('now')),
-  ('feature_flags','{"simulationMode":true,"publicStatusPage":true,"emailSubscriptions":true,"pushNotifications":true,"siteEditor":true,"deviceProvisioning":true,"opsConsole":true}',datetime('now')),
+  ('feature_flags','{"simulationMode":false,"publicStatusPage":true,"emailSubscriptions":true,"pushNotifications":true,"siteEditor":true,"deviceProvisioning":true,"opsConsole":true}',datetime('now')),
   ('site_status','{"emergency":false,"message":""}',datetime('now'))
 ON CONFLICT(key) DO NOTHING;

@@ -8,6 +8,11 @@ export interface TelemetryPoint {
   rainfallMm: number | null;
   state: FloodState;
   sensorHealthy: boolean;
+  barrierState?: string | null;
+  distanceCm?: number | null;
+  temperatureC?: number | null;
+  batteryVoltage?: number | null;
+  signalStrength?: number | null;
   createdAt: string;
 }
 
@@ -18,8 +23,8 @@ export interface DeviceSummary {
   zone: string;
   firmwareVersion: string;
   online: boolean;
-  lastSeenAt: string;
-  signal: number;
+  lastSeenAt: string | null;
+  signal: number | null;
   latestLevelCm: number | null;
   state: FloodState;
   approvalState?: string;
@@ -36,22 +41,23 @@ export interface FloodEvent {
 }
 
 export interface DashboardPayload {
-  mode: 'simulation' | 'turso';
+  mode: 'turso';
   project: string;
   city: string;
   zone: string;
   updatedAt: string;
   system: {
     levelCm: number | null;
+    distanceCm: number | null;
     state: FloodState;
-    barrier: BarrierState;
+    barrier: BarrierState | null;
     buzzer: boolean;
     sensorHealthy: boolean;
     emergencyStopActive: boolean;
     barrierLatched: boolean;
-    trendCm: number;
+    trendCm: number | null;
     rainfallMm: number | null;
-    seq: number;
+    seq: number | null;
     rateOfRiseCmPerMin?: number;
   };
   stats: {

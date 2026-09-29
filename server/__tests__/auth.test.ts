@@ -20,7 +20,7 @@ process.env.PUBLIC_APP_URL = 'https://floodguard.example.test';
 const database = await import('../database.js');
 await database.migrateDatabase();
 const createdAt = new Date().toISOString();
-await database.execute('INSERT INTO tenants(id,name,slug,created_at) VALUES(?,?,?,?)', ['auth-tenant', 'FloodGuard', 'floodguard-demo', createdAt]);
+await database.execute('INSERT INTO tenants(id,name,slug,created_at) VALUES(?,?,?,?)', ['auth-tenant', 'FloodGuard', 'floodguard-project', createdAt]);
 const { app } = await import('../index.js');
 const server = createServer(app);
 await new Promise<void>((resolve, reject) => {

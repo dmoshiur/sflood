@@ -18,7 +18,7 @@ process.env.ADMIN_CIDR_ALLOWLIST = '';
 const database = await import('../database.js');
 await database.migrateDatabase();
 const iso = new Date().toISOString();
-await database.execute('INSERT INTO tenants(id,name,slug,created_at) VALUES(?,?,?,?)', ['reg-tenant', 'Reg tenant', 'floodguard-demo', iso]);
+await database.execute('INSERT INTO tenants(id,name,slug,created_at) VALUES(?,?,?,?)', ['reg-tenant', 'Reg tenant', 'floodguard-project', iso]);
 await database.execute('INSERT INTO cities(id,tenant_id,name,created_at) VALUES(?,?,?,?)', ['reg-city', 'reg-tenant', 'Dhaka', iso]);
 await database.execute('INSERT INTO zones(id,city_id,name,created_at) VALUES(?,?,?,?)', ['reg-zone', 'reg-city', 'Ward 04', iso]);
 await database.execute(
@@ -108,6 +108,10 @@ test('device API validates credentials, sequence replay and reported-state consi
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   });
 
+  // Alternate, documented device registration route is protected by user authorization.
+  const registrationRoute = await fetch(`${baseUrl}/api/v1/devices/register`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify({ id: 'alias-device', name: 'Alias device', kind: 'ESP32_CONTROLLER', zoneId: 'reg-zone' }) });
+  assert.equal(registrationRoute.status, 401);
+
   // Unknown device + wrong key are rejected.
   const badKey = await fetch(`${baseUrl}/api/v1/telemetry`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wrong-device-key-000000000' },
@@ -182,4 +186,13 @@ test('device API validates credentials, sequence replay and reported-state consi
   assert.equal(status.simulation, false);
   assert.equal(status.state, 'CRITICAL');
   assert.ok(Array.isArray(status.safetyInstructions) && status.safetyInstructions.length > 0);
+
+  const aliasTelemetry = await fetch(`${baseUrl}/api/v1/devices/reg-device/telemetry`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer device-key-for-registration-tests-00' },
+    body: JSON.stringify({ seq: 3, waterLevel: 14.5, distance: 48.2, barrierState: 'closed', sensorStatus: 'ok' }),
+  });
+  assert.equal(aliasTelemetry.status, 202);
+  const persisted = await database.execute('SELECT level_cm,distance_cm FROM telemetry WHERE device_id=? AND seq=?', ['reg-device', 3]);
+  assert.equal(Number((persisted.rows[0] as Record<string, unknown>).level_cm), 14.5);
+  assert.equal(Number((persisted.rows[0] as Record<string, unknown>).distance_cm), 48.2);
 });

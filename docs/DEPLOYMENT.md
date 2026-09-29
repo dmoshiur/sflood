@@ -1,52 +1,65 @@
-# Deploying FloodGuard
+# Production deployment
 
-## Render
+FloodGuard is an educational prototype. A successful deployment does not make it suitable for life-safety or flood-defense use. Do not deploy it as a substitute for certified monitoring, alarms, or emergency systems.
 
-A ready `render.yaml` blueprint is included at the repository root. It declares:
+## Requirements
 
-- `floodguard-db` — a Turso connection is configured separately (see below).
-- `floodguard-api` — Node web service: `npm ci && npm run build` then `npm start`, health check `/api/health`.
+- Node.js 20.19 or newer.
+- A provisioned Turso/libSQL database and server-side `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`.
+- HTTPS at the public edge, secure cookies, and a reverse proxy configuration that matches the deployment platform.
+- Independent secrets and narrowly scoped network allowlists.
 
-Steps:
+Without Turso, database-backed API operations fail closed. Do not expect local JSON storage, generated readings, or a demo data mode.
 
-1. Fork/push this repository to GitHub and create a new Blueprint instance from `render.yaml`.
-2. Provision a Turso database (`turso db create floodguard`), grab the URL and token (`turso db show`, `turso db tokens create`).
-3. In the Render service environment set: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `SETTINGS_ENCRYPTION_KEY`, `SESSION_SECRET`, `OWNER_BOOTSTRAP_TOKEN`, `ADMIN_CIDR_ALLOWLIST`, `DEVICE_CIDR_ALLOWLIST`, `OPS_SECURITY_EMAIL`, `PUBLIC_APP_URL`, `SESSION_COOKIE_SECURE=1`, `TRUST_PROXY=1`. Optional: `VAPID_*`, `IPINFO_TOKEN`, `VITE_FIRMWARE_*` links.
-4. First deploy, then run migrations (one-off shell or local against the production DB):
+## Render blueprint
+
+The repository includes `render.yaml` for a Node web service. It runs `npm ci && npm run build`, starts with `npm start`, and uses `/api/health` as its liveness check. Turso is provisioned separately.
+
+1. Deploy the repository's Render blueprint in the intended account and region.
+2. Create a Turso database in the intended environment and set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the service's secret environment.
+3. Configure all required secrets and network policies listed below before enabling account or device traffic.
+4. Apply schema migrations using a controlled release step or an approved operator environment:
 
    ```bash
+   npm ci
    npm run db:migrate
-   npm run db:seed    # development/reference data only — skip for production
    ```
 
-5. Create the first owner: `POST /api/auth/bootstrap` with `OWNER_BOOTSTRAP_TOKEN` from an allowed CIDR (see README).
+   Then run `npm run db:seed` once for this database. It creates only the initial tenant/project/city/zone metadata required by owner bootstrap and onboarding; it does not create users, devices, or readings. Review and update these metadata records and the seeded service-area allowlist before opening registration.
+5. Verify `/api/health/ready` reports database readiness and inspect application logs. Liveness alone does not establish database readiness.
+6. Bootstrap the first owner using the protected `/api/auth/bootstrap` route from an allowed source. Store the bootstrap token securely and rotate/remove its access after setup as the implementation permits.
+7. Enroll a test device in a controlled, non-life-safety environment. Verify the complete flow: approval, one-time provisioning, authenticated telemetry, stored readings, queued command, and device acknowledgement. Confirm the physical controller's local fail-safe behavior independently.
 
-## Environment variables
+## Configuration
 
-See `.env.example` for the full annotated list. Highlights:
+See [.env.example](../.env.example) for the current annotated list. Key settings:
 
-| Variable | Purpose |
+| Variable | Use |
 | --- | --- |
-| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | Turso/libSQL connection; empty URL runs the labeled local simulation |
-| `SETTINGS_ENCRYPTION_KEY` | AES-256-GCM key for SMTP/SMS/TOTP secrets at rest |
-| `SESSION_SECRET` | HMAC key for verification/unsubscribe tokens |
-| `OPS_SECURITY_EMAIL` | Inbox for the hourly rotating operations code |
-| `ADMIN_CIDR_ALLOWLIST` / `DEVICE_CIDR_ALLOWLIST` | Fail-closed CIDR gates for admin and device surfaces in production |
-| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push |
-| `VITE_FIRMWARE_ESP32_URL`, `VITE_FIRMWARE_ESP8266_URL`, `VITE_FIRMWARE_GITHUB_RELEASES_URL`, `VITE_FIRMWARE_GITHUB_REPO_URL` | Your own firmware/GitHub links shown on `/devices` (unset → the page says "not configured") |
+| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Server-side database connection. Never expose these to the browser or firmware. |
+| `SETTINGS_ENCRYPTION_KEY` | Encrypts stored sensitive integration settings. Back it up securely; loss may make encrypted values unreadable. |
+| `SESSION_SECRET` | Signs security tokens. Generate independently from all other secrets. |
+| `OWNER_BOOTSTRAP_TOKEN` | Initial owner bootstrap secret. Do not use as a normal account credential. |
+| `ADMIN_CIDR_ALLOWLIST` | Trusted source CIDRs for privileged admin operations. Review reverse-proxy address handling before setting this. |
+| `DEVICE_CIDR_ALLOWLIST` | Trusted device/gateway source CIDRs in production. Keep it narrow. |
+| `PUBLIC_APP_URL` | Canonical public HTTPS origin used by generated links. |
+| `SESSION_COOKIE_SECURE`, `TRUST_PROXY` | Configure secure cookies and trusted proxy behavior for the deployment topology. Trust only proxies under your control. |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Optional web push integration. |
+| `OPS_SECURITY_EMAIL` | Destination for configured rotating-operations access delivery. |
+| `VITE_FIRMWARE_*` | Optional public firmware/release links; set only to reviewed, controlled artifacts. |
 
-## Production checklist
+SMTP/SMS credentials are entered through protected server-side administration where supported. Keep all credentials out of client bundles, logs, firmware, and repository history.
 
-- [ ] All security checklist items in [SECURITY.md](SECURITY.md)
-- [ ] `npm run build && npm test` green in CI
-- [ ] Migrations applied (`npm run db:migrate`)
-- [ ] SMTP/SMS/Web Push providers configured and test-sent; delivery statuses visible in the owner console
-- [ ] Service areas match the deployment scope; registration tested from an allowed and a blocked city
-- [ ] Device provisioning flow tested end-to-end (token → QR → flash → telemetry → command ack)
-- [ ] Backup/restore rehearsed for Turso; `SETTINGS_ENCRYPTION_KEY` backed up
-- [ ] Firmware links on `/devices` point at your own releases
-- [ ] Prototype disclaimer visible on the public pages
+## Release and operational checks
 
-## Simulation mode
+- [ ] Build and automated tests pass for the exact release commit.
+- [ ] Production migrations are applied and database readiness is confirmed.
+- [ ] Backups and restoration have been tested; encryption-key recovery is documented.
+- [ ] TLS, cookie, CORS/origin, proxy, and CIDR configuration has been reviewed for the actual topology.
+- [ ] Owner bootstrap is complete and the bootstrap secret is protected/rotated.
+- [ ] Device approval, provisioning, telemetry persistence, command acknowledgement, and revocation have been tested using non-critical hardware.
+- [ ] Notification integrations have been explicitly configured and delivery tested if they are used.
+- [ ] Logs/alerts are monitored without recording credentials or provisioning tokens.
+- [ ] Safety disclaimers remain visible and all physical fail-safes are tested independently.
 
-With an empty `TURSO_DATABASE_URL` the API runs the local JSON store and the UI displays **SIMULATION** badges plus the "Generated demonstration feed" caption. Simulation mode never claims to be live — treat it strictly as a development tool.
+Automated tests and a healthy HTTP response are not evidence that a live Turso account, provider integration, device, actuator, backup, or production deployment has been verified. Record such verification separately and only after it has actually occurred.

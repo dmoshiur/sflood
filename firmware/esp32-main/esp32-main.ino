@@ -78,13 +78,14 @@ String deviceApiKey = FG_DEVICE_API_KEY;  // replaced at runtime by provisioning
 struct TelemetrySnapshot {
   uint32_t seq;
   float levelCm;
+  float distanceCm;
   float rateCmPerMin;
   FloodState state;
   bool sensorHealthy;
   bool barrierLatched;
   bool estopActive;
 };
-TelemetrySnapshot telemetrySnapshot = {0, NAN, 0.0f, STATE_UNKNOWN, false, false, false};
+TelemetrySnapshot telemetrySnapshot = {0, NAN, NAN, 0.0f, STATE_UNKNOWN, false, false, false};
 portMUX_TYPE snapshotMux = portMUX_INITIALIZER_UNLOCKED;
 
 float readDistanceCm() {
@@ -214,6 +215,7 @@ void updateLocalState() {
     return;
   }
   float distance = NAN;
+  currentDistanceCm = NAN;
   sensorHealthy = readMedianDistance(distance);
   if (!sensorHealthy) {
     state = STATE_UNKNOWN;
@@ -336,15 +338,18 @@ bool sendTelemetry(const TelemetrySnapshot &snapshot) {
   http.addHeader("Authorization", String("Bearer ") + deviceApiKey);
   char payload[512];
   const float level = isfinite(snapshot.levelCm) ? snapshot.levelCm : 0.0f;
+  char distanceJson[24];
+  if (snapshot.sensorHealthy && isfinite(snapshot.distanceCm)) snprintf(distanceJson, sizeof(distanceJson), "%.1f", snapshot.distanceCm);
+  else snprintf(distanceJson, sizeof(distanceJson), "null");
   const char *barrierState = snapshot.estopActive ? "FAULT" : !snapshot.sensorHealthy ? "HOLD" : snapshot.barrierLatched ? "RAISED" : "DOWN";
   snprintf(payload, sizeof(payload),
-    "{\"deviceId\":\"%s\",\"seq\":%lu,\"levelCm\":%.1f,\"rateOfRiseCmPerMin\":%.2f,\"sensorHealthy\":%s,"
+    "{\"deviceId\":\"%s\",\"seq\":%lu,\"levelCm\":%.1f,\"distanceCm\":%s,\"rateOfRiseCmPerMin\":%.2f,\"sensorHealthy\":%s,"
     "\"state\":\"%s\",\"barrierState\":\"%s\",\"limitSwitchState\":\"%s\",\"emergencyStopActive\":%s,"
-    "\"rssi\":%d,\"uptimeS\":%lu,\"firmwareVersion\":\"%s\",\"faultState\":\"%s\",\"timestamp\":\"%lu\"}",
-    FG_DEVICE_ID, (unsigned long)snapshot.seq, level, snapshot.rateCmPerMin, snapshot.sensorHealthy ? "true" : "false",
+    "\"rssi\":%d,\"uptimeS\":%lu,\"firmwareVersion\":\"%s\",\"faultState\":\"%s\"}",
+    FG_DEVICE_ID, (unsigned long)snapshot.seq, level, distanceJson, snapshot.rateCmPerMin, snapshot.sensorHealthy ? "true" : "false",
     stateName(snapshot.state), barrierState, limitSwitchState(), snapshot.estopActive ? "true" : "false",
     WiFi.RSSI(), (unsigned long)(millis() / 1000), FG_FIRMWARE_VERSION,
-    snapshot.estopActive ? "ESTOP" : snapshot.sensorHealthy ? "" : "SENSOR", (unsigned long)millis());
+    snapshot.estopActive ? "ESTOP" : snapshot.sensorHealthy ? "" : "SENSOR");
   const int code = http.POST((uint8_t *)payload, strlen(payload));
   const String response = http.getString();
   http.end();
@@ -445,14 +450,14 @@ void setup() {
   pinMode(PIN_LIMIT_TOP, INPUT_PULLUP);
   pinMode(PIN_LIMIT_BOTTOM, INPUT_PULLUP);
   preferences.begin("floodguard", false);
-  sequenceNumber = preferences.getUInt("seq", 4821);
+  sequenceNumber = preferences.getUInt("seq", 0);
   barrierLatched = preferences.getBool("latched", false);
   deviceApiKey = preferences.getString("apikey", FG_DEVICE_API_KEY);
   // Boot UNKNOWN. No automatic servo movement on startup; a persisted latch needs a deliberate local reset.
   state = STATE_UNKNOWN;
   stopServoSignals();
   portENTER_CRITICAL(&snapshotMux);
-  telemetrySnapshot = {sequenceNumber, currentLevelCm, rateOfRiseCmPerMin, state, sensorHealthy, barrierLatched, estopActive};
+  telemetrySnapshot = {sequenceNumber, currentLevelCm, currentDistanceCm, rateOfRiseCmPerMin, state, sensorHealthy, barrierLatched, estopActive};
   portEXIT_CRITICAL(&snapshotMux);
   xTaskCreatePinnedToCore(telemetryTask, "fg-telemetry", 12288, nullptr, 1, nullptr, 0);
   Serial.println("FloodGuard ESP32 model controller ready · simulation hardware only.");
@@ -466,7 +471,7 @@ void loop() {
     updateLocalState();
     updateBuzzer();
     portENTER_CRITICAL(&snapshotMux);
-    telemetrySnapshot = {0, currentLevelCm, rateOfRiseCmPerMin, state, sensorHealthy, barrierLatched, estopActive};
+    telemetrySnapshot = {0, currentLevelCm, currentDistanceCm, rateOfRiseCmPerMin, state, sensorHealthy, barrierLatched, estopActive};
     portEXIT_CRITICAL(&snapshotMux);
     Serial.printf("state=%s level=%.1fcm rate=%.2fcm/min sensor=%s barrier=%s latch=%s switch=%s estop=%s\n",
       stateName(state), isfinite(currentLevelCm) ? currentLevelCm : -1.0f, rateOfRiseCmPerMin,

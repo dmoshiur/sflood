@@ -64,14 +64,14 @@ const deviceCreateSchema = z.object({
 
 ownerRouter.get('/devices', requireAdmin, async (_req, res, next) => {
   try {
+    const user = authUser(res);
     const result = await execute(`
       SELECT d.*, z.name AS zone_name, c.name AS city_name, c.id AS city_id,
         (SELECT t.level_cm FROM telemetry t WHERE t.device_id=d.id ORDER BY t.seq DESC LIMIT 1) AS latest_level_cm,
         (SELECT t.state FROM telemetry t WHERE t.device_id=d.id ORDER BY t.seq DESC LIMIT 1) AS latest_state,
         (SELECT t.rssi FROM telemetry t WHERE t.device_id=d.id ORDER BY t.seq DESC LIMIT 1) AS latest_rssi
       FROM devices d JOIN zones z ON z.id=d.zone_id JOIN cities c ON c.id=d.city_id
-      ORDER BY d.created_at ASC`);
-    const user = authUser(res);
+      WHERE d.tenant_id=? ORDER BY d.created_at ASC`, [user.tenantId]);
     const devices = result.rows
       .map((raw) => {
         const row = raw as Record<string, unknown>;
@@ -85,6 +85,9 @@ ownerRouter.get('/devices', requireAdmin, async (_req, res, next) => {
           cityName: rowText(row, 'city_name'),
           approvalState: rowText(row, 'approval_state', 'APPROVED'),
           enabled: rowBoolean(row, 'enabled'),
+          online: rowBoolean(row, 'enabled') && Boolean(rowText(row, 'last_seen_at')) && Date.now() - new Date(rowText(row, 'last_seen_at')).getTime() < 120_000,
+          state: rowText(row, 'latest_state', 'UNKNOWN'),
+          zone: rowText(row, 'zone_name'),
           firmwareVersion: rowText(row, 'firmware_version'),
           lastSeenAt: rowText(row, 'last_seen_at') || null,
           limitSwitchState: rowText(row, 'limit_switch_state') || null,
@@ -101,12 +104,32 @@ ownerRouter.get('/devices', requireAdmin, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
+ownerRouter.get('/zones', requireAdmin, async (_req, res, next) => {
+  const user = authUser(res);
+  try {
+    const result = await execute('SELECT z.id,z.name,c.name AS city_name FROM zones z JOIN cities c ON c.id=z.city_id WHERE c.tenant_id=? ORDER BY c.name,z.name', [user.tenantId]);
+    res.json({ zones: result.rows.map((row) => ({ id: rowText(row, 'id'), name: rowText(row, 'name'), cityName: rowText(row, 'city_name') })) });
+  } catch (error) { next(error); }
+});
+
+ownerRouter.patch('/devices/:deviceId', requireAdmin, requireCsrf, async (req, res, next) => {
+  const parsed = z.object({ name: z.string().trim().min(2).max(80) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Device name must contain 2 to 80 characters.' }); return; }
+  const user = authUser(res);
+  try {
+    const result = await execute('UPDATE devices SET name=?,updated_at=? WHERE id=? AND tenant_id=?', [parsed.data.name, currentTimestamp(), String(req.params.deviceId), user.tenantId]);
+    if (!result.rowsAffected) { res.status(404).json({ error: 'Device not found.' }); return; }
+    await insertAudit({ tenantId: user.tenantId, actorId: user.id, action: 'DEVICE_RENAMED', targetType: 'device', targetId: String(req.params.deviceId), metadata: { name: parsed.data.name }, ipAddress: req.ip });
+    res.json({ saved: true, name: parsed.data.name });
+  } catch (error) { next(error); }
+});
+
 ownerRouter.post('/devices', requireAdmin, requireCsrf, async (req, res, next) => {
   const parsed = deviceCreateSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid device payload.' }); return; }
   const user = authUser(res);
   try {
-    const zone = await execute('SELECT z.id,z.city_id FROM zones z WHERE z.id=?', [parsed.data.zoneId]);
+    const zone = await execute('SELECT z.id,z.city_id FROM zones z JOIN cities c ON c.id=z.city_id WHERE z.id=? AND c.tenant_id=?', [parsed.data.zoneId, user.tenantId]);
     if (!zone.rows.length) { res.status(400).json({ error: 'Select an existing zone for the device.' }); return; }
     const cityId = rowText(zone.rows[0], 'city_id');
     if (user.role === 'ADMIN' && user.cityId && user.cityId !== cityId) {
@@ -134,7 +157,7 @@ ownerRouter.post('/devices', requireAdmin, requireCsrf, async (req, res, next) =
 ownerRouter.post('/devices/:deviceId/approve', requireAdmin, requireCsrf, async (req, res, next) => {
   const user = authUser(res);
   try {
-    const device = await execute('SELECT id,city_id,approval_state FROM devices WHERE id=?', [String(req.params.deviceId)]);
+    const device = await execute('SELECT id,city_id,approval_state FROM devices WHERE id=? AND tenant_id=?', [String(req.params.deviceId), user.tenantId]);
     if (!device.rows.length) { res.status(404).json({ error: 'Device not found.' }); return; }
     const row = device.rows[0] as Record<string, unknown>;
     if (user.role === 'ADMIN' && user.cityId && user.cityId !== rowText(row, 'city_id')) {
@@ -149,7 +172,7 @@ ownerRouter.post('/devices/:deviceId/approve', requireAdmin, requireCsrf, async 
 ownerRouter.post('/devices/:deviceId/revoke', requireAdmin, requireCsrf, async (req, res, next) => {
   const user = authUser(res);
   try {
-    const device = await execute('SELECT id,city_id FROM devices WHERE id=?', [String(req.params.deviceId)]);
+    const device = await execute('SELECT id,city_id FROM devices WHERE id=? AND tenant_id=?', [String(req.params.deviceId), user.tenantId]);
     if (!device.rows.length) { res.status(404).json({ error: 'Device not found.' }); return; }
     const row = device.rows[0] as Record<string, unknown>;
     if (user.role === 'ADMIN' && user.cityId && user.cityId !== rowText(row, 'city_id')) {
@@ -166,7 +189,7 @@ ownerRouter.post('/devices/:deviceId/revoke', requireAdmin, requireCsrf, async (
 ownerRouter.post('/devices/:deviceId/rotate-key', requireAdmin, requireCsrf, async (req, res, next) => {
   const user = authUser(res);
   try {
-    const device = await execute('SELECT id,city_id,tenant_id FROM devices WHERE id=?', [String(req.params.deviceId)]);
+    const device = await execute('SELECT id,city_id,tenant_id FROM devices WHERE id=? AND tenant_id=?', [String(req.params.deviceId), user.tenantId]);
     if (!device.rows.length) { res.status(404).json({ error: 'Device not found.' }); return; }
     const row = device.rows[0] as Record<string, unknown>;
     if (user.role === 'ADMIN' && user.cityId && user.cityId !== rowText(row, 'city_id')) {
@@ -185,7 +208,7 @@ ownerRouter.post('/devices/:deviceId/rotate-key', requireAdmin, requireCsrf, asy
 ownerRouter.post('/devices/:deviceId/provision-token', requireAdmin, requireCsrf, async (req, res, next) => {
   const user = authUser(res);
   try {
-    const device = await execute('SELECT id,city_id,kind,approval_state FROM devices WHERE id=?', [String(req.params.deviceId)]);
+    const device = await execute('SELECT id,city_id,kind,approval_state FROM devices WHERE id=? AND tenant_id=?', [String(req.params.deviceId), user.tenantId]);
     if (!device.rows.length) { res.status(404).json({ error: 'Device not found.' }); return; }
     const row = device.rows[0] as Record<string, unknown>;
     if (user.role === 'ADMIN' && user.cityId && user.cityId !== rowText(row, 'city_id')) {
@@ -216,7 +239,7 @@ ownerRouter.post('/devices/:deviceId/commands', requireAdmin, requireCsrf, async
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid command payload.' }); return; }
   const user = authUser(res);
   try {
-    const device = await execute('SELECT id,city_id,tenant_id FROM devices WHERE id=?', [String(req.params.deviceId)]);
+    const device = await execute('SELECT id,city_id,tenant_id FROM devices WHERE id=? AND tenant_id=?', [String(req.params.deviceId), user.tenantId]);
     if (!device.rows.length) { res.status(404).json({ error: 'Device not found.' }); return; }
     const row = device.rows[0] as Record<string, unknown>;
     if (user.role === 'ADMIN' && user.cityId && user.cityId !== rowText(row, 'city_id')) {
@@ -251,7 +274,8 @@ ownerRouter.get('/devices/:deviceId/commands', requireAdmin, async (req, res, ne
 ownerRouter.get('/flood-events', requireAdmin, async (req, res, next) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
   try {
-    const result = await execute('SELECT * FROM flood_events ORDER BY created_at DESC LIMIT ?', [limit]);
+    const user = authUser(res);
+    const result = await execute('SELECT * FROM flood_events WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?', [user.tenantId, limit]);
     res.json({
       events: result.rows.map((raw) => {
         const row = raw as Record<string, unknown>;
@@ -340,7 +364,7 @@ ownerRouter.put('/settings/automation', requireAdmin, requireCsrf, async (req, r
 
 ownerRouter.get('/settings/features', requireAdmin, async (_req, res, next) => {
   try {
-    res.json({ flags: await readSetting('feature_flags', { simulationMode: true, publicStatusPage: true, emailSubscriptions: true, pushNotifications: true, siteEditor: true, deviceProvisioning: true, opsConsole: true }) });
+    res.json({ flags: await readSetting('feature_flags', { publicStatusPage: true, emailSubscriptions: true, pushNotifications: true, siteEditor: true, deviceProvisioning: true, opsConsole: true }) });
   } catch (error) { next(error); }
 });
 
@@ -533,7 +557,7 @@ opsRouter.get('/deployment', requireOps, async (_req, res, next) => {
       name: pkg.name || 'floodguard',
       node: process.version,
       uptimeSeconds: Math.round(process.uptime()),
-      mode: isTursoConfigured ? 'turso' : 'simulation',
+      mode: isTursoConfigured ? 'turso' : 'unconfigured',
       migrations: migrations.rows.map((raw) => ({ version: rowText(raw, 'version'), appliedAt: rowText(raw, 'applied_at') })),
       featureFlags: await readSetting('feature_flags', {}),
       maintenance: await readSetting('maintenance_mode', { enabled: false }),
