@@ -8,18 +8,21 @@ import { decryptSecret, encryptSecret, hashPassword, hashToken, safeEqual, totpU
 
 const authRouter = express.Router();
 const ownerRouter = express.Router();
+const opsRouter = express.Router();
 const loginLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false });
 const bootstrapLimiter = rateLimit({ windowMs: 60 * 60_000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false });
 const inviteLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false });
 const totpLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false });
+const registerLimiter = rateLimit({ windowMs: 60 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false });
 const passwordSchema = z.string().min(12).max(128);
 const emailSchema = z.string().email().max(254).transform((value) => value.trim().toLowerCase());
 const nameSchema = z.string().trim().min(2).max(100);
 
 type AuthUser = {
   id: string; email: string; displayName: string; role: string; tenantId: string;
-  emailVerified: boolean; totpEnrolled: boolean; mfaVerified: boolean; sessionId: string;
+  emailVerified: boolean; totpEnrolled: boolean; mfaVerified: boolean; sessionId: string; cityId?: string | null;
 };
+export type { AuthUser };
 type SessionRow = Record<string, unknown>;
 
 function parseCookies(req: Request) {
@@ -65,7 +68,7 @@ function isAllowedByList(address: string, list: string | undefined, allowDevelop
   } catch { return false; }
 }
 function userResponse(user: AuthUser) {
-  return { id: user.id, email: user.email, displayName: user.displayName, role: user.role, emailVerified: user.emailVerified, totpEnrolled: user.totpEnrolled, mfaVerified: user.mfaVerified };
+  return { id: user.id, email: user.email, displayName: user.displayName, role: user.role, emailVerified: user.emailVerified, totpEnrolled: user.totpEnrolled, mfaVerified: user.mfaVerified, cityId: user.cityId ?? null };
 }
 
 async function createSession(req: Request, res: Response, user: SessionRow, mfaVerified: boolean) {
@@ -88,7 +91,7 @@ export async function findRequestSession(req: Request): Promise<AuthUser | null>
   const token = parseCookies(req).fg_session;
   if (!token || token.length < 32 || token.length > 128) return null;
   const result = await execute(`SELECT s.id AS session_id,s.token_hash,s.csrf_hash,s.mfa_verified,s.expires_at,s.revoked_at,
-    u.id,u.email,u.display_name,u.role,u.tenant_id,u.email_verified_at,u.disabled_at,u.totp_secret_enc
+    u.id,u.email,u.display_name,u.role,u.tenant_id,u.city_id,u.email_verified_at,u.disabled_at,u.totp_secret_enc
     FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? LIMIT 1`, [hashToken(token)]);
   if (!result.rows.length) return null;
   const row = result.rows[0] as SessionRow;
@@ -99,6 +102,7 @@ export async function findRequestSession(req: Request): Promise<AuthUser | null>
     id: String(row.id), email: String(row.email), displayName: String(row.display_name), role: String(row.role),
     tenantId: String(row.tenant_id), emailVerified: Boolean(row.email_verified_at), totpEnrolled: Boolean(row.totp_secret_enc),
     mfaVerified: !elevated || row.mfa_verified === 1 || row.mfa_verified === 1n, sessionId: String(row.session_id),
+    cityId: row.city_id ? String(row.city_id) : null,
   };
 }
 
@@ -134,6 +138,39 @@ export const requireOwner: RequestHandler = (req, res, next) => {
   if (!isAllowedByList(req.ip || req.socket.remoteAddress || '', allowlist)) { res.status(403).json({ error: 'Your source IP is not in ADMIN_CIDR_ALLOWLIST.' }); return; }
   next();
 };
+
+/**
+ * Role guard factory. OWNER/ADMIN are privileged roles: they require enrolled
+ * authenticator MFA and an allowlisted source IP. All checks are server-side.
+ */
+export function requireRole(...roles: Array<'OWNER' | 'ADMIN' | 'OPERATOR'>): RequestHandler {
+  return (req, res, next) => {
+    const user = res.locals.authUser as AuthUser | undefined;
+    if (!user || !roles.includes(user.role as 'OWNER' | 'ADMIN' | 'OPERATOR')) {
+      res.status(403).json({ error: `This action requires the ${roles.join(' or ')} role.` });
+      return;
+    }
+    const elevated = user.role === 'OWNER' || user.role === 'ADMIN';
+    if (elevated && (!user.mfaVerified || !user.totpEnrolled)) {
+      res.status(403).json({ error: 'Set up and verify an authenticator code before using admin controls.' });
+      return;
+    }
+    const allowlist = process.env.ADMIN_CIDR_ALLOWLIST;
+    if (!isAllowedByList(req.ip || req.socket.remoteAddress || '', allowlist)) {
+      res.status(403).json({ error: 'Your source IP is not in ADMIN_CIDR_ALLOWLIST.' });
+      return;
+    }
+    next();
+  };
+}
+
+export const requireAdmin = requireRole('OWNER', 'ADMIN');
+export const requireOperator = requireRole('OWNER', 'ADMIN', 'OPERATOR');
+
+/** Local admins are scoped to their assigned city; owners are global. */
+export function assertCityScope(user: AuthUser, cityId: string): boolean {
+  return user.role === 'OWNER' || !user.cityId || user.cityId === cityId;
+}
 
 async function ownerCount(activeOnly = true) {
   const result = await execute(activeOnly ? "SELECT COUNT(*) AS count FROM users WHERE role='OWNER' AND disabled_at IS NULL" : "SELECT COUNT(*) AS count FROM users WHERE role='OWNER'");
@@ -280,9 +317,102 @@ authRouter.post('/totp/confirm', totpLimiter, requireSession, requireCsrf, async
   } catch (error) { next(error); }
 });
 
-ownerRouter.use(requireSession, requireOwner);
+authRouter.post('/register', registerLimiter, async (req, res, next) => {
+  if (!sameOrigin(req, res)) return;
+  if (!isTursoConfigured) { res.status(503).json({ error: 'Registration is disabled until the database-backed deployment is configured.' }); return; }
+  const input = z.object({
+    name: nameSchema,
+    email: emailSchema,
+    password: passwordSchema,
+    countryCode: z.string().length(2),
+    cityName: z.string().min(2).max(80),
+    consent: z.literal(true),
+  }).safeParse(req.body);
+  if (!input.success) { res.status(400).json({ error: 'Name, valid email, 12+ character password, service-area city and consent are required.' }); return; }
+  try {
+    const { isCityServiced, geoAdvisory } = await import('./service-areas.js');
+    const tenantResult = await execute('SELECT id FROM tenants ORDER BY created_at LIMIT 1');
+    const tenantId = tenantResult.rows.length ? String((tenantResult.rows[0] as SessionRow).id) : null;
+    const serviced = await isCityServiced(input.data.countryCode, input.data.cityName);
+    if (!serviced) {
+      if (tenantId) {
+        await insertAudit({
+          tenantId,
+          action: 'REGISTER_OUT_OF_SERVICE_AREA', targetType: 'user', targetId: input.data.email,
+          metadata: { countryCode: input.data.countryCode, cityName: input.data.cityName }, ipAddress: req.ip,
+        });
+      }
+      res.status(403).json({ error: 'That city is not in the current service-area allowlist. Choose an enabled service area.' });
+      return;
+    }
+    // Optional advisory only — never a security boundary.
+    const advisory = await geoAdvisory(req.ip || '').catch(() => null);
+    const existing = await execute('SELECT id FROM users WHERE email=? LIMIT 1', [input.data.email]);
+    if (existing.rows.length) { res.status(409).json({ error: 'That email already has an account. Sign in instead.' }); return; }
+    if (!tenantId) { res.status(503).json({ error: 'Run npm run db:seed before opening registration.' }); return; }
+    const passwordHash = await hashPassword(input.data.password);
+    const rawToken = crypto.randomBytes(32).toString('base64url');
+    const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const userId = randomId();
+    await execute(
+      `INSERT INTO users(id,tenant_id,email,display_name,password_hash,role,email_verified_at,email_verification_token_hash,email_verification_expires_at,country,city_name,notification_prefs_json,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)`,
+      [userId, tenantId, input.data.email, input.data.name, passwordHash, 'MEMBER', hashToken(rawToken), expiresAt, input.data.countryCode.toUpperCase(), input.data.cityName, JSON.stringify({ floodAlerts: true, email: true, push: true, sms: false }), now, now],
+    );
+    await insertAudit({
+      tenantId, actorId: userId, action: 'USER_REGISTERED', targetType: 'user', targetId: userId,
+      metadata: { countryCode: input.data.countryCode, cityName: input.data.cityName, geoAdvisory: advisory },
+      ipAddress: req.ip,
+    });
+    // Double opt-in email through the outbox (queue/retry). Without SMTP the
+    // account stays unverified and the UI says exactly that — no fake delivery.
+    const publicOrigin = process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`;
+    const verifyUrl = new URL('/api/auth/verify-email', publicOrigin);
+    verifyUrl.searchParams.set('token', rawToken);
+    let emailQueued = false;
+    try {
+      const payload = JSON.stringify({
+        title: 'Confirm your FloodGuard email',
+        body: 'Confirm this address to activate your FloodGuard account. This is an educational prototype, not an emergency warning service.',
+        url: verifyUrl.toString(),
+      });
+      const queued = await execute(
+        `INSERT INTO outbox_events(id,dedupe_key,tenant_id,channel,recipient,payload_json,status,attempts,next_attempt_at,created_at)
+         VALUES(?,?,?,?,?,?,'PENDING',0,?,?) ON CONFLICT(dedupe_key) DO NOTHING`,
+        [randomId(), `email-verify:${userId}`, tenantId, 'EMAIL', input.data.email, payload, now, now],
+      );
+      emailQueued = queued.rowsAffected > 0;
+    } catch { /* SMTP unavailable: account remains pending verification */ }
+    res.status(201).json({
+      created: true,
+      verificationQueued: emailQueued,
+      message: emailQueued
+        ? 'Account created. Check your inbox for the confirmation link before signing in.'
+        : 'Account created, but email delivery is not configured, so the confirmation link could not be sent. Configure SMTP in Hackeradmin and resend from the profile page.',
+    });
+  } catch (error) {
+    if (String((error as { code?: string }).code || '').includes('SQLITE_CONSTRAINT')) { res.status(409).json({ error: 'That email already has an account.' }); return; }
+    next(error);
+  }
+});
 
-ownerRouter.get('/users', async (_req, res, next) => {
+authRouter.get('/verify-email', async (req, res, next) => {
+  const token = typeof req.query.token === 'string' ? req.query.token : '';
+  if (token.length < 32 || token.length > 128) { res.status(400).type('text').send('Invalid or expired verification link.'); return; }
+  try {
+    const result = await execute(
+      'UPDATE users SET email_verified_at=?,email_verification_token_hash=NULL,email_verification_expires_at=NULL,updated_at=? WHERE email_verification_token_hash=? AND email_verification_expires_at>? AND email_verified_at IS NULL',
+      [new Date().toISOString(), new Date().toISOString(), hashToken(token), new Date().toISOString()],
+    );
+    if (!result.rowsAffected) { res.status(400).type('text').send('Invalid, expired or already used verification link.'); return; }
+    res.status(200).type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>FloodGuard email confirmed</title><main style="font-family:system-ui;padding:2rem;max-width:40rem;margin:auto"><h1>Email confirmed</h1><p>Your account is verified. FloodGuard is an educational prototype, not an emergency warning service.</p><a href="/login">Sign in</a></main>');
+  } catch (error) { next(error); }
+});
+
+ownerRouter.use(requireSession);
+
+ownerRouter.get('/users', requireOwner, async (_req, res, next) => {
   try {
     const user = res.locals.authUser as AuthUser;
     const result = await execute('SELECT id,email,display_name,role,email_verified_at,disabled_at,totp_secret_enc,created_at FROM users WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200', [user.tenantId]);
@@ -293,7 +423,7 @@ ownerRouter.get('/users', async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-ownerRouter.post('/invites', requireCsrf, async (req, res, next) => {
+ownerRouter.post('/invites', requireOwner, requireCsrf, async (req, res, next) => {
   const input = z.object({ email: emailSchema, name: nameSchema }).safeParse(req.body);
   if (!input.success) { res.status(400).json({ error: 'Valid email and display name are required.' }); return; }
   const owner = res.locals.authUser as AuthUser;
@@ -313,7 +443,7 @@ ownerRouter.post('/invites', requireCsrf, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-ownerRouter.patch('/users/:userId', requireCsrf, async (req, res, next) => {
+ownerRouter.patch('/users/:userId', requireOwner, requireCsrf, async (req, res, next) => {
   const input = z.object({ disabled: z.boolean() }).safeParse(req.body);
   if (!input.success) { res.status(400).json({ error: 'Specify disabled as true or false.' }); return; }
   const owner = res.locals.authUser as AuthUser;
@@ -332,7 +462,7 @@ ownerRouter.patch('/users/:userId', requireCsrf, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-ownerRouter.post('/users/:userId/mfa/reset', requireCsrf, async (req, res, next) => {
+ownerRouter.post('/users/:userId/mfa/reset', requireOwner, requireCsrf, async (req, res, next) => {
   const owner = res.locals.authUser as AuthUser;
   const targetId = String(req.params.userId);
   if (targetId === owner.id) { res.status(400).json({ error: 'You cannot reset MFA for your own current super-admin session.' }); return; }
@@ -353,7 +483,7 @@ ownerRouter.post('/users/:userId/mfa/reset', requireCsrf, async (req, res, next)
   } catch (error) { next(error); }
 });
 
-ownerRouter.get('/audit', async (_req, res, next) => {
+ownerRouter.get('/audit', requireOwner, async (_req, res, next) => {
   try {
     const owner = res.locals.authUser as AuthUser;
     const result = await execute('SELECT a.id,a.action,a.target_type,a.target_id,a.metadata_json,a.ip_address,a.created_at,u.email AS actor_email FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id WHERE a.tenant_id=? ORDER BY a.created_at DESC LIMIT 200', [owner.tenantId]);
@@ -366,4 +496,4 @@ ownerRouter.get('/audit', async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-export { authRouter, ownerRouter };
+export { authRouter, ownerRouter, opsRouter };

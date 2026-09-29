@@ -183,12 +183,24 @@ async function processLocalOutbox() {
 
 let workerTimer: NodeJS.Timeout | undefined;
 let isWorking = false;
+let lastOpsSweep = 0;
 export function startNotificationWorker() {
   if (workerTimer) return;
   workerTimer = setInterval(async () => {
     if (isWorking) return;
     isWorking = true;
-    try { if (isTursoConfigured) await processTursoOutbox(); else await processLocalOutbox(); }
+    try {
+      if (isTursoConfigured) await processTursoOutbox(); else await processLocalOutbox();
+      // Rotate the hourly operations credential and expire stale commands/sessions.
+      if (isTursoConfigured && Date.now() - lastOpsSweep > 30_000) {
+        lastOpsSweep = Date.now();
+        const { ensureCurrentOpsCredential, sweepExpiredOps } = await import('./ops.js');
+        const { sweepExpiredCommands } = await import('./commands.js');
+        await ensureCurrentOpsCredential();
+        await sweepExpiredOps();
+        await sweepExpiredCommands();
+      }
+    }
     catch (error) { console.error('[FloodGuard outbox]', error); }
     finally { isWorking = false; }
   }, 5_000);

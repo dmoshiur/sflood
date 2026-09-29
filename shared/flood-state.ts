@@ -1,4 +1,8 @@
-export type FloodState = 'SAFE' | 'WATCH' | 'WARNING' | 'CRITICAL' | 'UNKNOWN' | 'FAULT';
+import type { FloodState } from './flood-engine.js';
+
+export type { FloodState } from './flood-engine.js';
+export { normalizeFloodState } from './flood-engine.js';
+
 export type BarrierState = 'DOWN' | 'RAISING' | 'RAISED' | 'FAULT' | 'HOLD';
 
 export interface Inputs {
@@ -7,17 +11,21 @@ export interface Inputs {
   emergencyStopActive: boolean;
 }
 
-/** The four educational demo thresholds defined in the FloodGuard project brief. */
+/**
+ * Educational level bands for the tray prototype. The full engine with
+ * hysteresis, rate-of-rise and recovery lives in ./flood-engine.js — this helper
+ * is the simple absolute-threshold mapping used by firmware and the simulator.
+ */
 export function floodStateForLevel(levelCm: number | null, sensorHealthy = true): FloodState {
   if (!sensorHealthy || levelCm === null || !Number.isFinite(levelCm) || levelCm < 0) return 'UNKNOWN';
   if (levelCm >= 50) return 'CRITICAL';
   if (levelCm >= 35) return 'WARNING';
   if (levelCm >= 20) return 'WATCH';
-  return 'SAFE';
+  return 'NORMAL';
 }
 
 export function buzzerForState(state: FloodState): boolean {
-  return state === 'WATCH' || state === 'WARNING' || state === 'CRITICAL';
+  return state === 'WATCH' || state === 'WARNING' || state === 'CRITICAL' || state === 'RECOVERY';
 }
 
 export function barrierForInputs(
@@ -34,8 +42,9 @@ export function barrierForInputs(
 }
 
 export const THRESHOLDS_CM = {
-  safeMaximumExclusive: 20,
+  normalMaximumExclusive: 20,
   watchMinimumInclusive: 20,
   warningMinimumInclusive: 35,
   criticalMinimumInclusive: 50,
+  recoveryCompleteMaximumInclusive: 15,
 } as const;

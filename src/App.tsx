@@ -6,9 +6,15 @@ import {
   LockKeyhole, MapPin, Menu, Radio, RefreshCw, ShieldAlert, ShieldCheck,
   Signal, TriangleAlert, Waves, WifiOff, X, Zap,
 } from 'lucide-react';
-import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { getDashboard, getDevices, getHistory, formatTime, simulate, timeAgo } from './api';
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
+import { getDashboard, getHistory, formatTime, simulate, timeAgo } from './api';
 import NotificationPanel from './NotificationPanel';
+import { FloodGuardMark, Logo } from './brand';
+import StatusPage from './pages/StatusPage';
+import AlertsPage from './pages/AlertsPage';
+import DevicesHubPage from './pages/DevicesHubPage';
+import { LoginPage, RegisterPage, ProfilePage } from './pages/AccountPages';
+import { ContentPanel, DevicesPanel, EnginePanel, MaintenancePanel, OpsPanel, ServiceAreasPanel } from './AdminPanels';
 import { translate, type CopyKey, type Language } from './i18n';
 import type { DashboardPayload, DeviceSummary, FloodEvent, TelemetryPoint } from '../shared/types';
 import type { BarrierState, FloodState } from '../shared/flood-state';
@@ -26,32 +32,15 @@ function useAppCopy() {
 }
 
 const statusTone: Record<FloodState, string> = {
-  SAFE: 'safe', WATCH: 'watch', WARNING: 'warning', CRITICAL: 'critical', UNKNOWN: 'unknown', FAULT: 'fault',
+  NORMAL: 'safe', RECOVERY: 'safe', WATCH: 'watch', WARNING: 'warning', CRITICAL: 'critical', UNKNOWN: 'unknown', FAULT: 'fault',
 };
 const stateEnglish: Record<FloodState, string> = {
-  SAFE: 'Safe', WATCH: 'Watch', WARNING: 'Warning', CRITICAL: 'Critical', UNKNOWN: 'Unknown', FAULT: 'Fault',
+  NORMAL: 'Normal', RECOVERY: 'Recovery', WATCH: 'Watch', WARNING: 'Warning', CRITICAL: 'Critical', UNKNOWN: 'Unknown', FAULT: 'Fault',
 };
 const barrierEnglish: Record<BarrierState, string> = {
   DOWN: 'Down', RAISING: 'Raising', RAISED: 'Raised · latched', FAULT: 'Fault / E-stop', HOLD: 'Hold position',
 };
 
-function FloodGuardMark({ small = false }: { small?: boolean }) {
-  return <svg className={`brand-mark ${small ? 'brand-mark-small' : ''}`} viewBox="0 0 48 48" role="img" aria-label="FloodGuard mark">
-    <rect x="1" y="1" width="46" height="46" rx="15" fill="#112D27" />
-    <path d="M7 31c5 0 5-7 10-7s5 7 10 7 5-7 10-7" fill="none" stroke="#9FE66C" strokeWidth="3.2" strokeLinecap="round" />
-    <path d="M11 38c4 0 4-3.5 8-3.5s4 3.5 8 3.5 4-3.5 8-3.5" fill="none" stroke="#D6F5A6" strokeWidth="2.2" strokeLinecap="round" />
-    <path d="M11 16h12" stroke="#AAC3B1" strokeWidth="2.7" strokeLinecap="round" />
-    <circle cx="34" cy="15" r="5" fill="#F2A36D" /><circle cx="34" cy="15" r="1.8" fill="#FFF1C7" />
-    <path d="M34 6v-2m8 11h2M28 9l-1.5-1.5" stroke="#F6D18D" strokeWidth="1.2" strokeLinecap="round" />
-  </svg>;
-}
-
-function Logo() {
-  return <Link to="/" className="brand-lockup" aria-label="FloodGuard home">
-    <FloodGuardMark />
-    <span className="brand-name">Flood<span>Guard</span><small>SMART FLOOD CONTROL</small></span>
-  </Link>;
-}
 
 function Header() {
   const { language, setLanguage, t } = useAppCopy();
@@ -140,12 +129,15 @@ function App() {
       <Route path="/about" element={<AboutPage />} />
       <Route path="/app" element={<DashboardPage />} />
       <Route path="/app/history" element={<HistoryPage />} />
-      <Route path="/devices" element={<DevicesPage />} />
+      <Route path="/status" element={<StatusPage />} />
+      <Route path="/alerts" element={<AlertsPage />} />
+      <Route path="/profile" element={<ProfilePage />} />
+      <Route path="/devices" element={<DevicesHubPage />} />
       <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
       <Route path="/guides" element={<GuidesPage />} />
       <Route path="/guides/:slug" element={<GuideDetailPage />} />
-      <Route path="/login" element={<AuthNoticePage kind="login" />} />
-      <Route path="/register" element={<AuthNoticePage kind="register" />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
       <Route path="/hackeradmin" element={<OwnerConsolePage />} />
       <Route path="/maintenance" element={<MaintenancePage />} />
       <Route path="/privacy" element={<PolicyPage kind="privacy" />} />
@@ -194,7 +186,7 @@ function HomePage() {
     <section className="home-metrics page-width">
       <div className="home-metric-intro"><span className="section-kicker">THE IDEA IN ONE LOOK</span><h2>One small model.<br /><span>Four clear states.</span></h2><p>A physical demonstration of how a reading can become a visible state, a model response, and a useful alert.</p></div>
       <div className="state-steps">
-        <StateStep state="SAFE" range="0–19 cm" action="Barrier stays down" icon={<ShieldCheck size={17} />} />
+        <StateStep state="NORMAL" range="0–19 cm" action="Barrier stays down" icon={<ShieldCheck size={17} />} />
         <StateStep state="WATCH" range="20–34 cm" action="Buzzer chirps" icon={<Bell size={17} />} />
         <StateStep state="WARNING" range="35–49 cm" action="Model barrier raises" icon={<ArrowUp size={17} />} />
         <StateStep state="CRITICAL" range="50+ cm" action="Barrier latches raised" icon={<LockKeyhole size={17} />} />
@@ -206,7 +198,7 @@ function HomePage() {
         <div className="section-heading-row"><div><span className="section-kicker">THE CONTROL LOOP</span><h2>Measure. Decide. Demonstrate.</h2></div><Link to="/guides" className="arrow-link">View the build notes <ArrowUpRight size={15} /></Link></div>
         <div className="how-grid">
           <article className="how-card"><span className="how-index">01</span><div className="how-icon how-icon-aqua"><Waves size={22} /></div><h3>Measure the distance</h3><p>HC-SR04 ultrasonic sensing estimates the gap to the water surface. A median filter helps smooth noisy echoes.</p><span className="how-tag">HC-SR04 · ECHO DIVIDER</span></article>
-          <article className="how-card"><span className="how-index">02</span><div className="how-icon how-icon-lime"><Cpu size={22} /></div><h3>Classify the level</h3><p>The ESP32 applies calibrated local thresholds and moves through SAFE → WATCH → WARNING → CRITICAL.</p><span className="how-tag">ESP32 · LOCAL STATE MACHINE</span></article>
+          <article className="how-card"><span className="how-index">02</span><div className="how-icon how-icon-lime"><Cpu size={22} /></div><h3>Classify the level</h3><p>The ESP32 applies calibrated local thresholds and moves through NORMAL → WATCH → WARNING → CRITICAL, then RECOVERY as water recedes.</p><span className="how-tag">ESP32 · LOCAL STATE MACHINE</span></article>
           <article className="how-card"><span className="how-index">03</span><div className="how-icon how-icon-peach"><Bell size={22} /></div><h3>Alert and actuate</h3><p>A buzzer makes the state audible; lightweight servo barriers demonstrate the response. E-stop and fault handling come first.</p><span className="how-tag">SERVO MODEL · BUZZER · E-STOP</span></article>
         </div>
       </div>
@@ -288,7 +280,7 @@ function AboutPage() {
   return <main className="inner-page page-width">
     <div className="inner-page-heading"><span className="section-kicker">PROJECT BRIEF · 01 / 16</span><h1>FloodGuard, from water reading to model response.</h1><p>A complete science-fair concept for a sensor-led barrier and warning demonstration—kept deliberately separate from real flood infrastructure.</p></div>
     <div className="project-summary-grid"><article className="summary-card summary-card-dark"><span>PROJECT OWNER</span><strong>Md Moshiur Rahman Mohi</strong><small>Student science-fair prototype · Sep 27, 2026</small></article><article className="summary-card"><span>MODEL FOOTPRINT</span><strong>60 × 45 cm</strong><small>Raised island · guided wall · surrounding tray</small></article><article className="summary-card"><span>CONTROL CORE</span><strong>ESP32 + ESP8266</strong><small>Controller plus sender-only sensor node</small></article></div>
-    <section className="brief-section"><div className="brief-section-title"><span>01</span><div><h2>What the prototype demonstrates</h2><p>Four layers turn a sensor reading into a visible, testable idea.</p></div></div><div className="brief-points"><BriefPoint icon={<Waves />} title="Sense" text="Two ultrasonic sensors measure the water-to-sensor distance. Calibrated zero reference and a 7-sample median filter are planned to reduce noisy echoes." /><BriefPoint icon={<Activity />} title="Classify" text="The controller converts distance into water height and applies SAFE, WATCH, WARNING, CRITICAL, UNKNOWN and FAULT states." /><BriefPoint icon={<ArrowUp />} title="Respond" text="A lightweight, guided servo barrier demonstrates raising at WARNING/CRITICAL. Critical remains latched until an authorized local reset." /><BriefPoint icon={<Bell />} title="Communicate" text="The demo dashboard, buzzer and optional notification design make the state easier to understand at a science-fair table." /></div></section>
+    <section className="brief-section"><div className="brief-section-title"><span>01</span><div><h2>What the prototype demonstrates</h2><p>Four layers turn a sensor reading into a visible, testable idea.</p></div></div><div className="brief-points"><BriefPoint icon={<Waves />} title="Sense" text="Two ultrasonic sensors measure the water-to-sensor distance. Calibrated zero reference and a 7-sample median filter are planned to reduce noisy echoes." /><BriefPoint icon={<Activity />} title="Classify" text="The controller converts distance into water height and applies NORMAL, WATCH, WARNING, CRITICAL, RECOVERY, UNKNOWN and FAULT states." /><BriefPoint icon={<ArrowUp />} title="Respond" text="A lightweight, guided servo barrier demonstrates raising at WARNING/CRITICAL. Critical remains latched until an authorized local reset." /><BriefPoint icon={<Bell />} title="Communicate" text="The demo dashboard, buzzer and optional notification design make the state easier to understand at a science-fair table." /></div></section>
     <section className="brief-section tray-detail-section"><div className="brief-section-title"><span>02</span><div><h2>Physical tray &amp; model layout</h2><p>Use a small contained tray with the electronics protected from splash.</p></div></div><div className="tray-detail-grid"><div className="tray-plan-card"><TrayDiagram /></div><div className="safety-list"><h3>Build safety checklist</h3><SafetyPoint number="01" title="Start with one wall" text="Test a single light panel for five smooth up/down cycles before adding the second guide." /><SafetyPoint number="02" title="Limit the travel" text="Use physical end stops and a torque-limited servo range; a stall or jam must go to FAULT." /><SafetyPoint number="03" title="Keep electronics dry" text="Keep the ESP32, power supply and signal connections in a raised splash-protected enclosure." /><SafetyPoint number="04" title="Power deliberately" text="Power the servo rail separately (rated supply, typically ≥2 A for the model), with a shared ground and no 5 V backfeed into ESP32 GPIO." /></div></div></section>
     <section className="brief-section"><div className="brief-section-title"><span>03</span><div><h2>Bill of materials worksheet</h2><p>Quote local parts before purchase; the cost cells are intentionally left open.</p></div></div><BOMTable /></section>
     <section className="brief-section"><div className="brief-section-title"><span>04</span><div><h2>Planned software architecture</h2><p>The specification separates demo simulation from any future verified live deployment.</p></div></div><ArchitectureSpec /></section>
@@ -328,13 +320,49 @@ function ArchitectureSpec() {
   return <div className="architecture-spec-grid">{items.map((item, i) => <div className="architecture-spec-item" key={item.title}><span className="arch-spec-icon">{item.icon}</span><span className="arch-spec-index">0{i + 1}</span><strong>{item.title}</strong><small>{item.text}</small>{i < items.length - 1 && <ArrowRight className="arch-spec-arrow" size={15} />}</div>)}</div>;
 }
 
+function MobileBottomNav() {
+  const [moreOpen, setMoreOpen] = useState(false);
+  const location = useLocation();
+  useEffect(() => setMoreOpen(false), [location.pathname]);
+  const items = [
+    { to: '/', label: 'Home', icon: <HomeIcon size={19} />, end: true },
+    { to: '/status', label: 'Live', icon: <Activity size={19} /> },
+    { to: '/devices', label: 'Devices', icon: <Radio size={19} /> },
+    { to: '/alerts', label: 'Alerts', icon: <Bell size={19} /> },
+  ];
+  return <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
+    {items.map((item) => (
+      <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => isActive ? 'mobile-nav-item active' : 'mobile-nav-item'}>
+        {item.icon}<span>{item.label}</span>
+      </NavLink>
+    ))}
+    <button type="button" className={`mobile-nav-item ${moreOpen ? 'active' : ''}`} onClick={() => setMoreOpen((open) => !open)} aria-expanded={moreOpen}>
+      <Menu size={19} /><span>More</span>
+    </button>
+    {moreOpen && (
+      <div className="mobile-more-sheet">
+        <NavLink to="/app">Dashboard</NavLink>
+        <NavLink to="/app/history">History & trends</NavLink>
+        <NavLink to="/profile">Profile & notifications</NavLink>
+        <NavLink to="/guides">Build guides</NavLink>
+        <NavLink to="/about">Project brief</NavLink>
+        <NavLink to="/login">Sign in</NavLink>
+        <NavLink to="/hackeradmin">Owner console</NavLink>
+      </div>
+    )}
+  </nav>;
+}
+
 function AppShell({ children, title, subtitle, actions, mode }: { children: ReactNode; title: string; subtitle?: string; actions?: ReactNode; mode?: 'simulation' | 'turso' }) {
   const { t } = useAppCopy();
   const nav = [
     { to: '/app', label: t('nav.dashboard'), icon: <Gauge size={17} />, end: true },
+    { to: '/status', label: 'Live status', icon: <Activity size={17} /> },
     { to: '/app/history', label: 'History & trends', icon: <History size={17} /> },
     { to: '/devices', label: t('nav.devices'), icon: <Radio size={17} /> },
+    { to: '/alerts', label: 'Alerts', icon: <Bell size={17} /> },
     { to: '/guides', label: t('nav.guides'), icon: <BookOpen size={17} /> },
+    { to: '/profile', label: 'Profile', icon: <HomeIcon size={17} /> },
   ];
   return <main className="app-layout page-width">
     <aside className="app-sidebar">
@@ -344,9 +372,11 @@ function AppShell({ children, title, subtitle, actions, mode }: { children: Reac
       <div className="sidebar-divider"></div>
       <div className="sidebar-label">PROJECT</div>
       <NavLink to="/about" className={({ isActive }) => isActive ? 'side-link active' : 'side-link'}><Info size={17} /><span>Project brief</span></NavLink>
+      <NavLink to="/status" className={({ isActive }) => isActive ? 'side-link active' : 'side-link'}><Waves size={17} /><span>Public status</span></NavLink>
       <NavLink to="/hackeradmin" className="side-link"><LockKeyhole size={17} /><span>Owner console</span><LockKeyhole className="side-lock" size={12} /></NavLink>
       <div className="sidebar-bottom"><div className="sidebar-demo-icon"><TriangleAlert size={15} /></div><strong>Preview environment</strong><p>Sample data only. Telemetry is not connected to real hardware.</p><Link to="/about">Read safety notes <ArrowRight size={12} /></Link></div>
     </aside>
+    <MobileBottomNav />
     <section className="app-content">
       <div className="app-page-heading"><div><div className="breadcrumb"><Link to="/">FloodGuard</Link><ChevronRight size={12} /><span>Workspace</span><ChevronRight size={12} /><span>{title}</span></div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div><div className="app-heading-actions">{actions}<span className={`demo-mode-chip ${mode === 'turso' ? 'mode-turso' : ''}`}><i></i> {mode === 'turso' ? 'TURSO API' : 'SIMULATION'}</span></div></div>
       {children}
@@ -390,7 +420,7 @@ function DashboardPage() {
           <div className="water-level-main"><div className="water-level-number">{system?.levelCm === null || system?.levelCm === undefined ? '—' : system.levelCm.toFixed(1)}<span>cm</span></div><div className="trend-chip"><ArrowUpRight size={14} /> +{system?.trendCm ?? 0} cm <small>last 30 min</small></div></div>
           <WaterGauge value={system?.levelCm ?? 0} state={system?.state || 'UNKNOWN'} />
           <div className="water-scale"><span>0 cm</span><span>20</span><span>35</span><span>50</span><span>60 cm</span></div>
-          <div className="level-threshold-key"><span className="threshold-key-safe"><i></i> SAFE &lt;20</span><span className="threshold-key-watch"><i></i> WATCH 20–34</span><span className="threshold-key-warning"><i></i> WARNING 35–49</span><span className="threshold-key-critical"><i></i> CRITICAL ≥50</span></div>
+          <div className="level-threshold-key"><span className="threshold-key-safe"><i></i> NORMAL &lt;20</span><span className="threshold-key-watch"><i></i> WATCH 20–34</span><span className="threshold-key-warning"><i></i> WARNING 35–49</span><span className="threshold-key-critical"><i></i> CRITICAL ≥50</span></div>
           <p className="gauge-footnote"><Info size={12} /> Height relative to the model tray's calibrated sensor zero—not sea level.</p>
         </section>
         <section className="panel barrier-panel">
@@ -485,23 +515,6 @@ function HistoryPage() {
   </AppShell>;
 }
 
-function DevicesPage() {
-  const [devices, setDevices] = useState<DeviceSummary[]>([]);
-  const [error, setError] = useState('');
-  useEffect(() => { getDevices().then((result) => setDevices(result.devices)).catch((exception) => setError(exception.message)); }, []);
-  return <AppShell title="Devices" subtitle="A read-only view of the demo sensor network and controller roles.">
-    {error && <div className="api-error"><WifiOff size={17} /><span>{error}</span></div>}
-    <div className="device-intro-banner"><div className="device-intro-icon"><Radio size={20} /></div><div><strong>Device commands are disabled in this preview</strong><p>The ESP32 firmware owns offline barrier logic. The web API accepts telemetry only and cannot raise or lower a physical actuator.</p></div><span className="read-only-chip"><LockKeyhole size={12} /> READ ONLY</span></div>
-    <div className="devices-full-list">{devices.map((device) => <DeviceCard key={device.id} device={device} />)}</div>
-    <section className="device-roles-grid"><article><Cpu size={19} /><span className="section-kicker">ACTUATOR NODE</span><h3>ESP32 WROOM</h3><p>Measures/receives local readings, evaluates thresholds, drives two small servo channels and buzzer through safe interfaces, and monitors E-stop.</p><div className="pin-strip"><span>GPIO 25 · TRIG</span><span>GPIO 34 · ECHO</span><span>GPIO 18/19 · PWM</span></div></article><article><Radio size={19} /><span className="section-kicker">SENDER-ONLY NODE</span><h3>NodeMCU ESP8266</h3><p>Reads a second HC-SR04 and sends HTTPS telemetry with a device key and monotonic sequence. It never owns a servo, motor or barrier command.</p><div className="pin-strip"><span>D1 · TRIG</span><span>D2 · ECHO</span><span>DIVIDER · 5V → 3.3V</span></div></article></section>
-  </AppShell>;
-}
-
-function DeviceCard({ device }: { device: DeviceSummary }) {
-  const controller = device.kind.startsWith('ESP32');
-  return <Link to={`/devices/${device.id}`} className="device-card"><div className={`device-card-icon ${controller ? 'device-card-controller' : ''}`}>{controller ? <Cpu size={21} /> : <Radio size={21} />}</div><div className="device-card-main"><div className="device-card-title"><h2>{device.name}</h2><StateBadge state={device.state} compact /></div><p>{device.id} <span>·</span> {device.kind} <span>·</span> {device.zone}</p><div className="device-card-meta"><span><i className="online"></i>{device.online ? 'Sample heartbeat present' : 'No recent heartbeat'}</span><span>FW {device.firmwareVersion}</span><span>Signal {device.signal}%</span></div></div><div className="device-card-level"><span>LAST SAMPLE LEVEL</span><strong>{device.latestLevelCm === null ? '—' : `${device.latestLevelCm.toFixed(1)} cm`}</strong><span>{timeAgo(device.lastSeenAt)}</span></div><ChevronRight size={18} /></Link>;
-}
-
 function DeviceDetailPage() {
   const { deviceId } = useParams();
   const [device, setDevice] = useState<DeviceSummary | null>(null);
@@ -526,7 +539,7 @@ function GuidesPage() {
   const guides = [
     { slug: 'wiring', number: '01', title: 'ESP32 wiring & power', description: 'Pin map, common ground, echo voltage divider, servo supply and no-backfeed checklist.', icon: <Cpu size={20} />, tag: 'HARDWARE' },
     { slug: 'sender-node', number: '02', title: 'ESP8266 sender node', description: 'Sender-only wiring for D1/D2, its own Echo divider and HTTPS telemetry role.', icon: <Radio size={20} />, tag: 'DEVICE' },
-    { slug: 'thresholds', number: '03', title: 'Flood states & barrier logic', description: 'Median filtering, hysteresis, SAFE → WATCH → WARNING → CRITICAL and FAULT behavior.', icon: <Activity size={20} />, tag: 'FIRMWARE' },
+    { slug: 'thresholds', number: '03', title: 'Flood states & barrier logic', description: 'Median filtering, hysteresis, NORMAL → WATCH → WARNING → CRITICAL → RECOVERY and FAULT behavior.', icon: <Activity size={20} />, tag: 'FIRMWARE' },
     { slug: 'safety', number: '04', title: 'Tray model & safety', description: '60 × 45 cm model layout, single-wall test plan, shallow water and physical E-stop.', icon: <ShieldCheck size={20} />, tag: 'SAFETY' },
     { slug: 'architecture', number: '05', title: 'Backend & cloud architecture', description: 'Express API, Turso/libSQL migrations, protected Hackeradmin and consent-based notification outbox.', icon: <Layers3 size={20} />, tag: 'SOFTWARE' },
     { slug: 'demo-script', number: '06', title: 'Four-minute demo script', description: 'Rehearse WATCH, CRITICAL, sensor-fault and E-stop using the safe simulator.', icon: <Zap size={20} />, tag: 'PRESENTATION' },
@@ -548,7 +561,8 @@ const guideDetails: Record<string, { number: string; title: string; intro: strin
     { title: 'Telemetry contract', body: 'Each authenticated sender posts a monotonic integer sequence and a measured level. The server rejects duplicate and out-of-order sequence values.', bullets: ['POST /api/v1/telemetry over HTTPS', 'Authorization: Bearer <per-device key> (store a hash server-side)', 'Body includes deviceId, seq, levelCm, sensorHealthy and optional rainfallMm', 'Keep the key in ignored local configuration; never commit a real key to GitHub.'] },
   ] },
   thresholds: { number: '03', title: 'Flood states & barrier logic', intro: 'Use a calibrated sensor-to-zero reference, filtered distance samples, hysteresis and a latched response. The demo simulator uses the simple thresholds below.', sections: [
-    { title: 'Prototype thresholds', body: 'h = (d_zero − d_median) × calibration. The dashboard sample uses water-height centimeters; real thresholds must be validated for the exact tray and sensor geometry.', bullets: ['SAFE: h < 20 cm · barrier DOWN', 'WATCH: 20–34 cm · buzzer chirp', 'WARNING: 35–49 cm · raise the lightweight model barrier', 'CRITICAL: h ≥ 50 cm · barrier remains RAISED and latched', 'UNKNOWN: sensor invalid / stale · inhibit new movement and hold position', 'FAULT: E-stop, jam or actuator failure · cut actuator output and require local inspection/reset'] },
+    { title: 'Prototype thresholds', body: 'h = (d_zero − d_median) × calibration. The dashboard sample uses water-height centimeters; real thresholds must be validated for the exact tray and sensor geometry.', bullets: ['NORMAL: h < 20 cm · barrier DOWN', 'WATCH: 20–34 cm · buzzer chirp', 'WARNING: 35–49 cm · raise the lightweight model barrier', 'CRITICAL: h ≥ 50 cm · barrier remains RAISED and latched', 'RECOVERY: level receding · barrier stays latched until the recovery cooldown completes',
+    'UNKNOWN: sensor invalid / stale · inhibit new movement and hold position', 'FAULT: E-stop, jam or actuator failure · cut actuator output and require local inspection/reset'] },
     { title: 'Filtering and latching', body: 'Sample seven valid echoes per cycle and use the median; reject timeouts and physically impossible jumps. Add entry/exit hysteresis at each boundary to prevent threshold chatter.', bullets: ['At boot, initialize the barrier state as UNKNOWN; do not auto-lower.', 'A jam or E-stop enters FAULT. Acknowledge only after physical inspection.', 'CRITICAL requires a deliberate local OWNER reset after level is below the safe threshold.', 'A cloud/API outage must not stop the ESP32 local safety state machine.'] },
   ] },
   safety: { number: '04', title: 'Tray model & safety', intro: 'The tray is an educational tabletop demonstration, not a miniature engineering design for a real barrier.', sections: [
@@ -560,7 +574,7 @@ const guideDetails: Record<string, { number: string; title: string; intro: strin
     { title: 'Preview boundary', body: 'Without Turso credentials the API uses a local JSON simulation store. No real sensor, SMTP/SMS provider or push key is bundled. Real delivery and persistence require operator-supplied credentials and security configuration; the server never issues motor commands.', bullets: ['Sample telemetry is fictional and is not an alert service.', 'Email uses double opt-in; SMS uses a one-time code and verified phone consent.', 'Provider credentials are encrypted at rest and never returned to the browser.', 'Turso mode does not enable the browser simulator or a remote actuator route.'] },
   ] },
   'demo-script': { number: '06', title: 'Four-minute science-fair demo', intro: 'Show the whole concept without wet electronics or remote actuation.', sections: [
-    { title: 'Run of show', body: 'Use the built-in dashboard simulator with the physical model disconnected or on a guarded low-voltage test setup.', bullets: ['0:00–0:45 · Show tray, sensor line-of-sight and the raised island.', '0:45–1:30 · Click +5 cm once or twice; explain SAFE → WATCH and the buzzer pattern.', '1:30–2:30 · Cross WARNING; show the model barrier status and history event.', '2:30–3:10 · Simulate a sensor fault; explain UNKNOWN and hold-position behavior.', '3:10–3:35 · Test simulated E-stop and describe the physical NC switch.', '3:35–4:00 · Explain limitations, costs and what would need validation next.'] },
+    { title: 'Run of show', body: 'Use the built-in dashboard simulator with the physical model disconnected or on a guarded low-voltage test setup.', bullets: ['0:00–0:45 · Show tray, sensor line-of-sight and the raised island.', '0:45–1:30 · Click +5 cm once or twice; explain NORMAL → WATCH and the buzzer pattern.', '1:30–2:30 · Cross WARNING; show the model barrier status and history event.', '2:30–3:10 · Simulate a sensor fault; explain UNKNOWN and hold-position behavior.', '3:10–3:35 · Test simulated E-stop and describe the physical NC switch.', '3:35–4:00 · Explain limitations, costs and what would need validation next.'] },
     { title: 'Evidence to capture', body: 'Acceptance criteria should be shown with logs or video, not claims.', bullets: ['Five repeatable wall movements with no binding.', 'E-stop cut-off and manual recovery evidence.', 'Sensor-timeout → UNKNOWN behavior.', 'Duplicate sequence rejected with HTTP 409.', 'No cloud connection → local firmware still evaluates level.'] },
   ] },
 };
@@ -597,57 +611,12 @@ type SmsSettings = { enabled: boolean; configured: boolean; endpoint: string; au
 type ConsoleMember = { id: string; email: string; displayName: string; role: string; emailVerified: boolean; disabled: boolean; totpEnrolled: boolean; createdAt: string };
 type AuditEntry = { id: string; action: string; targetType: string; targetId: string | null; metadata: unknown; ipAddress: string | null; createdAt: string; actorEmail: string };
 
-function AuthNoticePage({ kind }: { kind: 'login' | 'register' }) {
-  const isLogin = kind === 'login';
-  const navigate = useNavigate();
-  const inviteToken = isLogin ? '' : new URLSearchParams(window.location.search).get('invite') || '';
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [totp, setTotp] = useState('');
-  const [showTotp, setShowTotp] = useState(false);
-  const [message, setMessage] = useState('');
-  const [working, setWorking] = useState(false);
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setWorking(true); setMessage('');
-    try {
-      if (isLogin) {
-        const result = await requestJson('/api/auth/login', 'POST', { email, password, ...(totp ? { totp } : {}) });
-        if (result.mfaSetupRequired || result.user?.role === 'OWNER' || result.user?.role === 'ADMIN') navigate('/hackeradmin');
-        else navigate('/app');
-      } else {
-        if (!inviteToken) throw new Error('Admin registration is invite-only. Ask a FloodGuard super-admin for a secure invite link.');
-        if (password !== confirmPassword) throw new Error('Passwords do not match.');
-        const result = await requestJson('/api/auth/accept-invite', 'POST', { token: inviteToken, password });
-        setMessage(result.message || 'Invitation accepted. Continue in Hackeradmin to enroll MFA.');
-        setTimeout(() => navigate('/hackeradmin'), 600);
-      }
-    } catch (error) {
-      const text = error instanceof Error ? error.message : 'Authentication request failed.';
-      if (text.toLowerCase().includes('authenticator code')) setShowTotp(true);
-      setMessage(text);
-    } finally { setWorking(false); }
-  };
-  return <main className="admin-auth-page page-width"><div className="admin-auth-card"><div className="admin-auth-brand"><FloodGuardMark small /><div><strong>FLOODGUARD</strong><span>SECURE PROJECT ACCESS</span></div></div><span className="section-kicker">{isLogin ? 'ACCOUNT SIGN-IN' : 'INVITED ADMIN ACCOUNT'}</span><h1>{isLogin ? 'Sign in to your workspace.' : 'Accept your invitation.'}</h1><p>{isLogin ? 'Admin access uses a protected Turso database, an individual password and authenticator MFA.' : 'This one-time link expires after 48 hours. Admin accounts must enroll authenticator MFA before changing settings.'}</p>
-    {!isLogin && !inviteToken && <div className="admin-inline-warning"><TriangleAlert size={15} /> Public account creation is closed. A super-admin must issue an invitation.</div>}
-    {message && <p className="admin-feedback" role="status">{message}</p>}
-    <form className="admin-form" onSubmit={(event) => void submit(event)}>
-      {isLogin && <label>Email address<input type="email" autoComplete="username" required maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="admin@example.com" /></label>}
-      <label>{isLogin ? 'Password' : 'Create a strong password'}<input type="password" required minLength={12} maxLength={128} autoComplete={isLogin ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 12 characters" /></label>
-      {!isLogin && <label>Confirm password<input type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label>}
-      {isLogin && showTotp && <label>Authenticator code<input inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={totp} onChange={(event) => setTotp(event.target.value)} placeholder="6 digits" autoComplete="one-time-code" /></label>}
-      <button className="admin-primary-button" type="submit" disabled={working || (!isLogin && !inviteToken)}>{working ? 'Working…' : isLogin ? 'Sign in securely' : 'Accept invitation'} <ArrowRight size={15} /></button>
-    </form>
-    <div className="admin-auth-footer">{isLogin ? <>Need an invitation? <Link to="/register">Accept invite</Link></> : <>Already invited? <Link to="/login">Sign in</Link></>} <span>·</span><Link to="/app">Return to demo</Link></div>
-  </div></main>;
-}
-
 function OwnerConsolePage() {
   const [authStatus, setAuthStatus] = useState<{ databaseConfigured: boolean; authEnabled: boolean; bootstrapAvailable: boolean; ownerCount: number } | null>(null);
   const [user, setUser] = useState<ConsoleUser | null>(null);
   const [csrf, setCsrf] = useState('');
   const [screen, setScreen] = useState<'loading' | 'bootstrap' | 'login' | 'mfa' | 'console' | 'blocked'>('loading');
-  const [tab, setTab] = useState<'overview' | 'providers' | 'admins' | 'audit'>('overview');
+  const [tab, setTab] = useState<'overview' | 'devices' | 'engine' | 'content' | 'areas' | 'maintenance' | 'providers' | 'admins' | 'audit' | 'ops'>('overview');
   const [message, setMessage] = useState('');
   const [working, setWorking] = useState(false);
   const [bootstrapName, setBootstrapName] = useState('');
@@ -810,13 +779,19 @@ function OwnerConsolePage() {
         {screen === 'mfa' && <div className="admin-mfa-card"><div className="admin-mfa-icon"><ShieldCheck size={22} /></div><span className="section-kicker">MANDATORY ADMIN MFA</span><h2>Protect this super-admin account.</h2><p>Use an authenticator app supporting standard six-digit TOTP. This secret is shown once; store it in your secure authenticator, never in source control.</p>{!totpSecret ? <button className="admin-primary-button" onClick={() => void startTotp()} disabled={working}>{working ? 'Preparing…' : 'Start authenticator setup'} <ArrowRight size={14} /></button> : <><div className="totp-secret-box"><small>AUTHENTICATOR SECRET</small><strong>{totpSecret}</strong><span>Or use this URI in a trusted authenticator: <code>otpauth://totp/FloodGuard…</code></span></div><form className="admin-form" onSubmit={(event) => void confirmTotp(event)}><label>Current six-digit code<input inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required value={totpCode} onChange={(event) => setTotpCode(event.target.value)} autoComplete="one-time-code" /></label><button className="admin-primary-button" disabled={working || totpCode.length !== 6}>{working ? 'Checking code…' : 'Verify and open console'} <Check size={14} /></button></form></>}</div>}
         {screen === 'console' && user && <>
           <div className="admin-session-ribbon"><span><i></i> SIGNED IN AS <strong>{user.displayName}</strong></span><span>{user.role} · {user.email} · TOTP VERIFIED</span></div>
-          <nav className="admin-tabs" aria-label="Hackeradmin sections">{([['overview','Overview'],['providers','Provider gateways'],['admins','Super-admins'],['audit','Audit trail']] as const).map(([id,label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}{id === 'providers' && <span className="tab-slash">/</span>}</button>)}</nav>
+          <nav className="admin-tabs" aria-label="Hackeradmin sections">{([['overview','Overview'],['devices','Devices'],['engine','Flood engine'],['content','Site tools'],['areas','Service areas'],['maintenance','Maintenance'],['providers','Provider gateways'],['admins','Super-admins'],['audit','Audit trail'],['ops','Operations']] as const).map(([id,label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}{id === 'providers' && <span className="tab-slash">/</span>}</button>)}</nav>
           {tab === 'overview' && <div className="admin-overview-grid"><article className="admin-overview-card admin-card-feature"><span className="admin-card-kicker">SECURE SERVER CONFIGURATION</span><h2>Providers are encrypted at rest.</h2><p>SMTP and SMS gateway credentials are stored in Turso using AES-256-GCM. The encryption key stays in the server environment; saved secrets are never returned to the browser.</p><button className="admin-primary-button" onClick={() => setTab('providers')}>Configure gateways <ArrowRight size={14} /></button></article><article className="admin-stat-card"><small>ACTIVE SUPER-ADMINS</small><strong>{members.filter((member) => member.role === 'OWNER' && !member.disabled).length}</strong><span>Last owner cannot be disabled</span></article><article className="admin-stat-card"><small>SMTP STATUS</small><strong className={smtp.configured ? 'status-enabled' : ''}>{smtp.configured ? 'READY' : 'NOT SET'}</strong><span>{smtp.lastTestStatus || 'No test run yet'}</span></article><article className="admin-stat-card"><small>SMS GATEWAY</small><strong className={sms.configured ? 'status-enabled' : ''}>{sms.configured ? 'READY' : 'NOT SET'}</strong><span>{sms.lastTestStatus || 'No test run yet'}</span></article><article className="admin-stat-card"><small>SECURITY POSTURE</small><strong className="status-enabled">MFA + CIDR</strong><span>Admin actions are audited</span></article></div>}
           {tab === 'providers' && <div className="provider-grid">
             <section className="admin-provider-card"><div className="provider-card-heading"><span className="provider-index">01 / SMTP</span><span className={`provider-state ${smtp.configured ? 'online' : ''}`}><i></i>{smtp.configured ? 'ACTIVE' : 'DISABLED'}</span></div><h2>Email transport</h2><p>Configure a standard SMTP relay. Passwords are encrypted and only replaced when a new value is submitted.</p><form className="admin-form provider-form" onSubmit={(event) => void saveSmtp(event)}><div className="provider-field-pair"><label>SMTP host<input required maxLength={255} value={smtp.host} onChange={(event) => setSmtp({ ...smtp, host: event.target.value })} placeholder="smtp.example.com" /></label><label>Port<input required type="number" min={1} max={65535} value={smtp.port} onChange={(event) => setSmtp({ ...smtp, port: Number(event.target.value) })} /></label></div><div className="provider-field-pair"><label>Username<input autoComplete="username" value={smtp.username} onChange={(event) => setSmtp({ ...smtp, username: event.target.value })} /></label><label>Password<input type="password" autoComplete="new-password" value={smtpPassword} onChange={(event) => setSmtpPassword(event.target.value)} placeholder={smtp.hasPassword ? 'Saved — blank keeps current password' : 'SMTP password or app password'} /></label></div><label>From name<input required value={smtp.fromName} maxLength={100} onChange={(event) => setSmtp({ ...smtp, fromName: event.target.value })} /></label><label>From email<input required type="email" value={smtp.fromAddress} onChange={(event) => setSmtp({ ...smtp, fromAddress: event.target.value })} placeholder="alerts@example.org" /></label><label>Reply-to email<input type="email" value={smtp.replyTo} onChange={(event) => setSmtp({ ...smtp, replyTo: event.target.value })} /></label><label className="admin-check-row"><input type="checkbox" checked={smtp.secure} onChange={(event) => setSmtp({ ...smtp, secure: event.target.checked })} /> Use implicit TLS (usually port 465)</label><label className="admin-check-row"><input type="checkbox" checked={smtp.enabled} onChange={(event) => setSmtp({ ...smtp, enabled: event.target.checked })} /> Enable email delivery</label><button className="admin-primary-button" type="submit" disabled={working}>{working ? 'Saving…' : 'Save encrypted SMTP settings'} <Check size={14} /></button></form><div className="provider-test-row"><input type="email" value={smtpTestRecipient} onChange={(event) => setSmtpTestRecipient(event.target.value)} placeholder="Optional test recipient" /><button className="admin-quiet-button" onClick={() => void testSmtp()} disabled={working}>Verify / send test</button></div><small className="provider-test-status">{smtp.lastTestStatus || 'Never tested'}</small></section>
             <section className="admin-provider-card"><div className="provider-card-heading"><span className="provider-index">02 / SMS HTTP</span><span className={`provider-state ${sms.configured ? 'online' : ''}`}><i></i>{sms.configured ? 'ACTIVE' : 'DISABLED'}</span></div><h2>SMS gateway</h2><p>Connect an HTTPS JSON gateway. The test button sends a real message and may incur carrier/provider charges.</p><form className="admin-form provider-form" onSubmit={(event) => void saveSms(event)}><label>Gateway HTTPS endpoint<input required type="url" value={sms.endpoint} onChange={(event) => setSms({ ...sms, endpoint: event.target.value })} placeholder="https://api.provider.example/messages" /></label><div className="provider-field-pair"><label>Auth header<input value={sms.authHeader} maxLength={64} onChange={(event) => setSms({ ...sms, authHeader: event.target.value })} /></label><label>Auth prefix<input value={sms.authPrefix} maxLength={40} onChange={(event) => setSms({ ...sms, authPrefix: event.target.value })} placeholder="Bearer " /></label></div><label>API token<input type="password" autoComplete="new-password" value={smsToken} onChange={(event) => setSmsToken(event.target.value)} placeholder={sms.hasToken ? 'Saved — blank keeps current token' : 'Gateway API token'} /></label><label>Sender ID<input value={sms.senderId} maxLength={64} onChange={(event) => setSms({ ...sms, senderId: event.target.value })} placeholder="FloodGuard" /></label><div className="provider-field-pair"><label>Recipient JSON key<input value={sms.toField} onChange={(event) => setSms({ ...sms, toField: event.target.value })} /></label><label>Message JSON key<input value={sms.messageField} onChange={(event) => setSms({ ...sms, messageField: event.target.value })} /></label></div><label>Sender JSON key<input value={sms.senderField} onChange={(event) => setSms({ ...sms, senderField: event.target.value })} /></label><label className="admin-check-row"><input type="checkbox" checked={sms.enabled} onChange={(event) => setSms({ ...sms, enabled: event.target.checked })} /> Enable SMS delivery</label><button className="admin-primary-button" type="submit" disabled={working}>{working ? 'Saving…' : 'Save encrypted SMS settings'} <Check size={14} /></button></form><div className="provider-test-row"><input type="tel" value={smsTestRecipient} onChange={(event) => setSmsTestRecipient(event.target.value)} placeholder="+8801XXXXXXXXX" /><button className="admin-quiet-button" onClick={() => void testSms()} disabled={working || !smsTestRecipient}>Send paid test SMS</button></div><small className="provider-test-status">{sms.lastTestStatus || 'Never tested'} · E.164 phone required</small></section>
           </div>}
           {tab === 'admins' && <div className="admin-users-layout"><section className="admin-provider-card"><span className="provider-index">03 / PRIVILEGED USERS</span><h2>Invite another super-admin.</h2><p>New super-admin accounts are invite-only. The one-time link is displayed once; share it out of band. Every invited owner must enroll TOTP before administration.</p><form className="admin-form" onSubmit={(event) => void createInvite(event)}><label>Display name<input required minLength={2} maxLength={100} value={inviteName} onChange={(event) => setInviteName(event.target.value)} /></label><label>Email address<input type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} /></label><button className="admin-primary-button" disabled={working}>{working ? 'Creating invite…' : 'Generate one-time invite'} <ArrowRight size={14} /></button></form>{inviteUrl && <div className="invite-output"><small>ONE-TIME LINK · EXPIRES IN 48 HOURS</small><code>{inviteUrl}</code><button className="admin-quiet-button" onClick={() => void copyInvite()}>Copy link</button></div>}</section><section className="admin-provider-card admin-member-list"><div className="provider-card-heading"><span className="provider-index">CURRENT ADMIN ACCOUNTS</span><span>{members.length} USERS</span></div>{members.map((member) => <article className="admin-member-row" key={member.id}><span className="member-avatar">{member.displayName.slice(0,1).toUpperCase()}</span><span className="member-main"><strong>{member.displayName}</strong><small>{member.email} · {member.role}</small></span><span className={`member-mfa ${member.totpEnrolled ? 'ok' : ''}`}>{member.totpEnrolled ? 'MFA ON' : 'MFA PENDING'}</span>{member.totpEnrolled && <button className="admin-quiet-button" disabled={working || member.id === user.id} onClick={() => void resetMemberMfa(member)}>Reset MFA</button>}<button className="admin-quiet-button" disabled={working || (member.role === 'OWNER' && !member.disabled && members.filter((item) => item.role === 'OWNER' && !item.disabled).length <= 1)} onClick={() => void toggleMember(member)}>{member.disabled ? 'Enable' : 'Disable'}</button></article>)}</section></div>}
+          {tab === 'devices' && <DevicesPanel />}
+          {tab === 'engine' && <EnginePanel />}
+          {tab === 'content' && <ContentPanel />}
+          {tab === 'areas' && <ServiceAreasPanel />}
+          {tab === 'maintenance' && <MaintenancePanel />}
+          {tab === 'ops' && <OpsPanel csrf={csrf} />}
           {tab === 'audit' && <section className="admin-provider-card admin-audit-card"><div className="provider-card-heading"><span className="provider-index">04 / IMMUTABLE EVENTS</span><span>{audit.length} RECENT ENTRIES</span></div><h2>Admin audit trail</h2><p>Provider edits, authentication, invitations and account changes are recorded with actor, target, time and source IP.</p><div className="admin-audit-list">{audit.map((entry) => <article key={entry.id}><span className="audit-line-mark">/</span><div><strong>{entry.action}</strong><small>{entry.actorEmail} · {entry.targetType}{entry.targetId ? `:${entry.targetId}` : ''}</small></div><time>{formatTime(entry.createdAt,{ dateStyle: 'medium', timeStyle: 'short' })}</time><code>{entry.ipAddress || '—'}</code></article>)}{audit.length === 0 && <p className="admin-empty">No audit events have been recorded yet.</p>}</div></section>}
         </>}
       </section>

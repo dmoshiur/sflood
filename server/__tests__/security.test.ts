@@ -34,7 +34,10 @@ test('password hashing, encrypted settings, TOTP and consent tokens have secure 
   const ciphertext = security.encryptSecret('smtp-password-should-never-be-returned');
   assert.notEqual(ciphertext, 'smtp-password-should-never-be-returned');
   assert.equal(security.decryptSecret(ciphertext), 'smtp-password-should-never-be-returned');
-  assert.throws(() => security.decryptSecret(`${ciphertext.slice(0, -1)}x`));
+  // Corrupt the GCM auth tag (second segment) deterministically — decryption must fail.
+  const parts = ciphertext.split('.');
+  const corruptedTag = parts[2]!.startsWith('A') ? `B${parts[2]!.slice(1)}` : `A${parts[2]!.slice(1)}`;
+  assert.throws(() => security.decryptSecret([parts[0], parts[1], corruptedTag, parts[3]].join('.')));
 
   const secret = security.createTotpSecret();
   const now = 1_700_000_000_000;
