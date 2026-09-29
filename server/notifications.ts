@@ -2,7 +2,6 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import webpush from 'web-push';
 import { execute, isTursoConfigured, requireTurso } from './database.js';
-import { readStore, writeStore } from './data.js';
 import { getSavedProvider, sendEmail, sendSms } from './providers.js';
 
 const publicKey = process.env.VAPID_PUBLIC_KEY || '';
@@ -30,7 +29,7 @@ export async function notificationConfig() {
     vapidPublicKey: publicKey || null,
     emailAvailable: Boolean(smtp?.enabled && publicUrlReady),
     smsAvailable: Boolean(sms?.enabled && publicUrlReady && secretReady),
-    mode: isTursoConfigured ? 'turso' : 'simulation',
+    mode: isTursoConfigured ? 'turso' : 'unconfigured',
   };
 }
 
@@ -148,38 +147,6 @@ async function processTursoOutbox() {
   }
 }
 
-async function processLocalOutbox() {
-  const store = readStore();
-  const now = Date.now();
-  let changed = false;
-  for (const item of store.outbox) {
-    const entry = item as { id?: string; dedupeKey?: string; channel?: string; recipient?: string; payload?: unknown; status?: string; attempts?: number; nextAttemptAt?: string; lastError?: string };
-    if (entry.status !== 'PENDING' && entry.status !== 'RETRYING') continue;
-    if (!entry.channel || !(await available(entry.channel))) continue;
-    if (entry.nextAttemptAt && new Date(entry.nextAttemptAt).getTime() > now) continue;
-    entry.status = 'PROCESSING'; entry.attempts = (entry.attempts || 0) + 1; changed = true;
-    const sub = entry.channel === 'WEB_PUSH' ? store.pushSubscriptions.find((subscription) => subscription.endpoint === entry.recipient) : null;
-    try {
-      if (entry.channel === 'WEB_PUSH') {
-        if (!sub) throw new Error('Push subscription is no longer active.');
-        await webpush.sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, JSON.stringify(payloadCopy(entry.payload)), { TTL: 60 });
-      } else throw new Error('SMTP and SMS providers can only be configured in protected Turso-backed Hackeradmin.');
-      entry.status = 'SENT';
-    } catch (error) {
-      const statusCode = (error as { statusCode?: number }).statusCode;
-      if (statusCode === 404 || statusCode === 410) {
-        store.pushSubscriptions = store.pushSubscriptions.filter((subscription) => subscription.endpoint !== entry.recipient);
-        entry.status = 'SENT';
-      } else {
-        const attempts = entry.attempts || 1;
-        entry.lastError = String(error).slice(0, 500);
-        entry.status = attempts >= 5 ? 'DEAD_LETTER' : 'RETRYING';
-        entry.nextAttemptAt = new Date(now + retryDelayMs[Math.min(attempts - 1, retryDelayMs.length - 1)]!).toISOString();
-      }
-    }
-  }
-  if (changed) writeStore(store);
-}
 
 let workerTimer: NodeJS.Timeout | undefined;
 let isWorking = false;
@@ -190,7 +157,7 @@ export function startNotificationWorker() {
     if (isWorking) return;
     isWorking = true;
     try {
-      if (isTursoConfigured) await processTursoOutbox(); else await processLocalOutbox();
+      if (isTursoConfigured) await processTursoOutbox();
       // Rotate the hourly operations credential and expire stale commands/sessions.
       if (isTursoConfigured && Date.now() - lastOpsSweep > 30_000) {
         lastOpsSweep = Date.now();

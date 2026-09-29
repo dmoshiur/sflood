@@ -27,22 +27,8 @@ function toServiceArea(raw: unknown): ServiceArea {
   };
 }
 
-// In the labeled local simulation there is no database to migrate, so the same
-// seed list as migrations/0005_service_areas.sql is used. These are simulated
-// rows of the demonstration deployment — Turso deployments always use the table.
-const SIMULATION_SERVICE_AREAS: ServiceArea[] = [
-  { id: 'sim-area-dhaka', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Dhaka', enabled: true },
-  { id: 'sim-area-chattogram', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Chattogram', enabled: true },
-  { id: 'sim-area-khulna', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Khulna', enabled: true },
-  { id: 'sim-area-rajshahi', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Rajshahi', enabled: true },
-  { id: 'sim-area-sylhet', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Sylhet', enabled: true },
-  { id: 'sim-area-barishal', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Barishal', enabled: true },
-  { id: 'sim-area-rangpur', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Rangpur', enabled: true },
-  { id: 'sim-area-mymensingh', countryCode: 'BD', countryName: 'Bangladesh', cityName: 'Mymensingh', enabled: true },
-];
-
 export async function listServiceAreas(includeDisabled = false): Promise<ServiceArea[]> {
-  if (!isTursoConfigured) return SIMULATION_SERVICE_AREAS;
+  if (!isTursoConfigured) return [];
   const result = await execute(
     includeDisabled
       ? 'SELECT * FROM service_areas ORDER BY country_name,city_name'
@@ -52,11 +38,7 @@ export async function listServiceAreas(includeDisabled = false): Promise<Service
 }
 
 export async function isCityServiced(countryCode: string, cityName: string): Promise<boolean> {
-  const country = countryCode.trim().toUpperCase();
-  const city = cityName.trim().toLowerCase();
-  if (!isTursoConfigured) {
-    return SIMULATION_SERVICE_AREAS.some((area) => area.enabled && area.countryCode === country && area.cityName.toLowerCase() === city);
-  }
+  if (!isTursoConfigured) return false;
   const result = await execute(
     'SELECT id FROM service_areas WHERE enabled=1 AND country_code=? AND city_name=? COLLATE NOCASE',
     [countryCode.trim().toUpperCase(), cityName.trim()],

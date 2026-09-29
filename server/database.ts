@@ -80,13 +80,13 @@ function toPoint(raw: unknown): TelemetryPoint {
   return {
     id: text(row, 'id'), deviceId: text(row, 'device_id'), seq: number(row, 'seq'), levelCm: number(row, 'level_cm'),
     rainfallMm: nullableNumber(row, 'rainfall_mm'), state: normalizeFloodState(text(row, 'state', 'UNKNOWN')),
-    sensorHealthy: boolean(row, 'sensor_healthy'), createdAt: iso(row.created_at),
+    sensorHealthy: boolean(row, 'sensor_healthy'), barrierState: text(row, 'barrier_state') || null, distanceCm: nullableNumber(row, 'distance_cm'), temperatureC: nullableNumber(row, 'temperature_c'), createdAt: iso(row.created_at),
   };
 }
 
 function toDevice(raw: unknown): DeviceSummary {
   const row = asRow(raw);
-  const lastSeenAt = text(row, 'last_seen_at', iso(row.created_at));
+  const lastSeenAt = text(row, 'last_seen_at');
   const seenMs = new Date(lastSeenAt).getTime();
   const rssi = nullableNumber(row, 'latest_rssi');
   return {
@@ -94,7 +94,7 @@ function toDevice(raw: unknown): DeviceSummary {
     kind: text(row, 'kind') === 'ESP32_CONTROLLER' ? 'ESP32 controller' : 'ESP8266 sender',
     zone: text(row, 'zone_name'), firmwareVersion: text(row, 'firmware_version'),
     online: boolean(row, 'enabled') && Number.isFinite(seenMs) && Date.now() - seenMs < 120_000,
-    lastSeenAt, signal: rssi === null ? 82 : Math.max(0, Math.min(100, Math.round((rssi + 100) * 3))),
+    lastSeenAt, signal: rssi === null ? null : Math.max(0, Math.min(100, Math.round((rssi + 100) * 3))),
     latestLevelCm: nullableNumber(row, 'latest_level_cm'), state: normalizeFloodState(text(row, 'latest_state', 'UNKNOWN')),
     approvalState: text(row, 'approval_state', 'APPROVED'),
     limitSwitchState: text(row, 'limit_switch_state') || null,
@@ -127,12 +127,16 @@ async function getDashboardRows(tenantId?: string) {
   return result.rows.map(toDevice);
 }
 
-export async function getTursoDashboard(): Promise<DashboardPayload> {
+export async function getTursoDashboard(tenantId?: string): Promise<DashboardPayload> {
   requireTurso();
-  const rows = await getDashboardRows();
-  const rawDevices = await execute(`SELECT d.*, z.name AS zone_name, c.name AS city_name FROM devices d JOIN zones z ON z.id=d.zone_id JOIN cities c ON c.id=d.city_id WHERE d.tenant_id=(SELECT id FROM tenants ORDER BY created_at LIMIT 1) ORDER BY d.created_at ASC`);
+  const rows = await getDashboardRows(tenantId);
+  const rawDevices = await execute(`SELECT d.*, z.name AS zone_name, c.name AS city_name FROM devices d JOIN zones z ON z.id=d.zone_id JOIN cities c ON c.id=d.city_id WHERE d.tenant_id=COALESCE(?,(SELECT id FROM tenants ORDER BY created_at LIMIT 1)) ORDER BY d.created_at ASC`, [tenantId ?? null]);
   const controllerRaw = rawDevices.rows.map(asRow).find((row) => text(row, 'kind') === 'ESP32_CONTROLLER') || rawDevices.rows.map(asRow)[0];
-  if (!controllerRaw) throw new Error('No FloodGuard device is configured in Turso. Run npm run db:seed.');
+  if (!controllerRaw) {
+    const maintenanceResult = await execute("SELECT value_json FROM site_settings WHERE key='maintenance_mode'");
+    const maintenanceMode = maintenanceResult.rows.length > 0 && text(asRow(maintenanceResult.rows[0]), 'value_json') === 'true';
+    return { mode: 'turso', project: 'FloodGuard — Smart Flood Control & Automation', city: '—', zone: '—', updatedAt: new Date().toISOString(), system: { levelCm: null, distanceCm: null, state: 'UNKNOWN', barrier: 'HOLD', buzzer: false, sensorHealthy: false, emergencyStopActive: false, barrierLatched: false, trendCm: null, rainfallMm: null, seq: null }, stats: { activeDevices: 0, zones: 0, alerts: 0, samplesToday: 0 }, devices: rows, history: [], events: [], maintenanceMode };
+  }
   const controller = controllerRaw;
   const points = await execute('SELECT * FROM telemetry WHERE device_id=? ORDER BY seq DESC LIMIT 40', [text(controller, 'id')]);
   const chronological = [...points.rows].reverse();
@@ -140,59 +144,61 @@ export async function getTursoDashboard(): Promise<DashboardPayload> {
   const latest = chronological.length ? asRow(chronological[chronological.length - 1]) : null;
   const latestState = latest ? text(latest, 'state', 'UNKNOWN') as FloodState : text(controller, 'current_state', 'UNKNOWN') as FloodState;
   const prior = chronological.length >= 4 ? asRow(chronological[chronological.length - 4]) : chronological.length >= 2 ? asRow(chronological[chronological.length - 2]) : null;
-  const trendCm = latest && prior ? Math.round((number(latest, 'level_cm') - number(prior, 'level_cm')) * 10) / 10 : 0;
+  const trendCm = latest && prior ? Math.round((number(latest, 'level_cm') - number(prior, 'level_cm')) * 10) / 10 : null;
   const nowIso = new Date().toISOString();
   const countToday = await execute('SELECT COUNT(*) AS count FROM telemetry WHERE device_id=? AND created_at>=?', [text(controller, 'id'), new Date(new Date().setHours(0, 0, 0, 0)).toISOString()]);
   const zoneCount = await execute('SELECT COUNT(*) AS count FROM zones WHERE city_id=?', [text(controller, 'city_id')]);
   const maintenanceResult = await execute("SELECT value_json FROM site_settings WHERE key='maintenance_mode'");
   const maintenanceMode = maintenanceResult.rows.length > 0 && text(asRow(maintenanceResult.rows[0]), 'value_json') === 'true';
-  // The event feed comes from persisted flood_events (the flood engine writes one
-  // row per transition). Derived transitions are only a fallback for old data.
   const events: FloodEvent[] = [];
-  try {
-    const persisted = await execute('SELECT id,state,reason,created_at FROM flood_events WHERE device_id=? ORDER BY created_at DESC LIMIT 8', [text(controller, 'id')]);
-    for (const raw of persisted.rows) {
-      const row = asRow(raw);
-      const [title, message] = eventTitle(text(row, 'state'));
-      events.push({ id: text(row, 'id'), title, message: text(row, 'reason') || message, state: normalizeFloodState(text(row, 'state')), createdAt: iso(row.created_at) });
-    }
-  } catch {
-    for (let i = 1; i < history.length; i += 1) {
-      if (history[i].state !== history[i - 1].state && history[i].state !== 'NORMAL') {
-        const [title, message] = eventTitle(history[i].state);
-        events.push({ id: `transition-${history[i].id}`, title, message, state: history[i].state, createdAt: history[i].createdAt });
-      }
-    }
+  const persisted = await execute('SELECT id,state,reason,created_at FROM flood_events WHERE device_id=? ORDER BY created_at DESC LIMIT 8', [text(controller, 'id')]);
+  for (const raw of persisted.rows) {
+    const row = asRow(raw);
+    const [title, message] = eventTitle(text(row, 'state'));
+    events.push({ id: text(row, 'id'), title, message: text(row, 'reason') || message, state: normalizeFloodState(text(row, 'state')), createdAt: iso(row.created_at) });
   }
   const state = boolean(controller, 'emergency_stop_active') ? 'FAULT' : latestState;
+  const currentBarrier = latest ? text(controller, 'barrier_state', 'HOLD') as BarrierState : null;
   return {
     mode: 'turso', project: 'FloodGuard — Smart Flood Control & Automation',
     city: text(controller, 'city_name', 'Unconfigured city'), zone: text(controller, 'zone_name', 'Unconfigured zone'), updatedAt: nowIso,
     system: {
       levelCm: latest && !boolean(latest, 'sensor_healthy') ? null : latest ? number(latest, 'level_cm') : null,
+      distanceCm: latest ? nullableNumber(latest, 'distance_cm') : null,
       state,
-      barrier: text(controller, 'barrier_state', 'HOLD') as BarrierState,
+      barrier: currentBarrier,
       buzzer: buzzerForState(state), sensorHealthy: latest ? boolean(latest, 'sensor_healthy') : false,
       emergencyStopActive: boolean(controller, 'emergency_stop_active'), barrierLatched: boolean(controller, 'barrier_latched'),
-      trendCm, rainfallMm: latest ? nullableNumber(latest, 'rainfall_mm') : null, seq: latest ? number(latest, 'seq') : number(controller, 'last_seq'),
+      trendCm: latest ? trendCm : null, rainfallMm: latest ? nullableNumber(latest, 'rainfall_mm') : null, seq: latest ? number(latest, 'seq') : null,
     },
     stats: { activeDevices: rows.filter((item) => item.online).length, zones: number(asRow(zoneCount.rows[0] || {}), 'count'), alerts: ['WATCH', 'WARNING', 'CRITICAL', 'FAULT'].includes(state) ? 1 : 0, samplesToday: number(asRow(countToday.rows[0] || {}), 'count') },
     devices: rows, history, events: events.slice(-8).reverse(), maintenanceMode,
   };
 }
 
-export async function getTursoHistory(limit: number): Promise<TelemetryPoint[]> {
-  const controller = await execute("SELECT id FROM devices WHERE kind='ESP32_CONTROLLER' ORDER BY created_at LIMIT 1");
-  if (!controller.rows.length) return [];
-  const deviceId = text(asRow(controller.rows[0]), 'id');
-  const result = await execute('SELECT * FROM telemetry WHERE device_id=? ORDER BY seq DESC LIMIT ?', [deviceId, limit]);
+export async function getTursoHistory(limit: number, tenantId?: string, requestedDeviceId?: string, from?: string, to?: string): Promise<TelemetryPoint[]> {
+  if (requestedDeviceId) {
+    const owned = await execute('SELECT id FROM devices WHERE id=? AND tenant_id=COALESCE(?,tenant_id)', [requestedDeviceId, tenantId ?? null]);
+    if (!owned.rows.length) return [];
+    const result = await execute('SELECT * FROM telemetry WHERE device_id=? AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?) ORDER BY seq DESC LIMIT ?', [requestedDeviceId, from ?? null, from ?? null, to ?? null, to ?? null, limit]);
+    return [...result.rows].reverse().map(toPoint);
+  }
+  const result = await execute(`SELECT t.* FROM telemetry t JOIN devices d ON d.id=t.device_id WHERE d.tenant_id=COALESCE(?,(SELECT id FROM tenants ORDER BY created_at LIMIT 1)) AND (? IS NULL OR t.created_at>=?) AND (? IS NULL OR t.created_at<=?) ORDER BY t.created_at DESC LIMIT ?`, [tenantId ?? null, from ?? null, from ?? null, to ?? null, to ?? null, limit]);
   return [...result.rows].reverse().map(toPoint);
 }
 
-export async function getTursoDevices(): Promise<DeviceSummary[]> { return getDashboardRows(); }
+export async function getTursoDevices(tenantId?: string): Promise<DeviceSummary[]> { return getDashboardRows(tenantId); }
 
-export async function getTursoDeviceDetail(deviceId: string) {
-  const result = await execute(`SELECT d.*, z.name AS zone_name, c.name AS city_name FROM devices d JOIN zones z ON z.id=d.zone_id JOIN cities c ON c.id=d.city_id WHERE d.id=?`, [deviceId]);
+export async function getTursoDeviceReadings(deviceId: string, tenantId: string, limit: number, from?: string, to?: string): Promise<TelemetryPoint[] | null> {
+  const owned = await execute('SELECT id FROM devices WHERE id=? AND tenant_id=?', [deviceId, tenantId]);
+  if (!owned.rows.length) return null;
+  const result = await execute('SELECT * FROM telemetry WHERE device_id=? AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?) ORDER BY seq DESC LIMIT ?', [deviceId, from ?? null, from ?? null, to ?? null, to ?? null, limit]);
+  return [...result.rows].reverse().map(toPoint);
+}
+
+
+export async function getTursoDeviceDetail(deviceId: string, tenantId?: string) {
+  const result = await execute(`SELECT d.*, z.name AS zone_name, c.name AS city_name FROM devices d JOIN zones z ON z.id=d.zone_id JOIN cities c ON c.id=d.city_id WHERE d.id=? AND d.tenant_id=COALESCE(?,d.tenant_id)`, [deviceId, tenantId ?? null]);
   if (!result.rows.length) return null;
   const row = asRow(result.rows[0]);
   const latest = await execute('SELECT * FROM telemetry WHERE device_id=? ORDER BY seq DESC LIMIT 80', [deviceId]);
@@ -205,7 +211,7 @@ export async function getTursoDeviceCredential(deviceId: string) {
 }
 
 export async function ingestTursoTelemetry(input: {
-  deviceId: string; seq: number; levelCm: number; rainfallMm?: number; sensorHealthy: boolean;
+  deviceId: string; seq: number; levelCm: number; distanceCm?: number; rainfallMm?: number; sensorHealthy: boolean;
   deviceState?: FloodState; reportedBarrier?: BarrierState; emergencyStopActive?: boolean;
   rateOfRiseCmPerMin?: number | null; rssi?: number | null; uptimeS?: number | null;
   firmwareVersion?: string | null; faultState?: string | null; limitSwitchState?: string | null;
@@ -260,14 +266,19 @@ export async function ingestTursoTelemetry(input: {
   const tx = await client.transaction('write');
   try {
     await tx.execute({
-      sql: `INSERT INTO telemetry(id,device_id,seq,level_cm,rainfall_mm,rate_of_rise_cm_min,state,barrier_state,limit_switch_state,sensor_healthy,rssi,uptime_s,firmware_version,fault_state,reported_at,received_at,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      sql: `INSERT INTO telemetry(id,device_id,seq,level_cm,distance_cm,rainfall_mm,rate_of_rise_cm_min,state,barrier_state,limit_switch_state,sensor_healthy,rssi,uptime_s,firmware_version,fault_state,reported_at,received_at,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       args: [
-        pointId, input.deviceId, input.seq, input.levelCm, input.rainfallMm ?? null, Math.round(rate * 100) / 100,
+        pointId, input.deviceId, input.seq, input.levelCm, input.distanceCm ?? null, input.rainfallMm ?? null, Math.round(rate * 100) / 100,
         nextState, barrier, input.limitSwitchState ?? null, input.sensorHealthy ? 1 : 0,
         input.rssi ?? null, input.uptimeS ?? null, input.firmwareVersion ?? null, input.faultState ?? null,
         input.reportedAt ?? null, createdAt, createdAt,
       ],
+    });
+    await tx.execute({
+      sql: `INSERT INTO device_status(device_id,online,sensor_status,current_water_level,current_distance,barrier_state,last_heartbeat_at,updated_at)
+        VALUES(?,1,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET online=1,sensor_status=excluded.sensor_status,current_water_level=excluded.current_water_level,current_distance=excluded.current_distance,barrier_state=excluded.barrier_state,last_heartbeat_at=excluded.last_heartbeat_at,updated_at=excluded.updated_at`,
+      args: [input.deviceId, input.sensorHealthy ? 'ok' : 'fault', input.sensorHealthy ? input.levelCm : null, input.distanceCm ?? null, barrier, createdAt, createdAt],
     });
     await tx.execute({
       sql: 'UPDATE devices SET last_seq=?,last_seen_at=?,current_state=?,barrier_state=?,barrier_latched=?,emergency_stop_active=?,rate_of_rise_cm_min=?,last_rssi=?,uptime_s=?,fault_state=?,limit_switch_state=?,firmware_version=COALESCE(?,firmware_version),updated_at=? WHERE id=?',

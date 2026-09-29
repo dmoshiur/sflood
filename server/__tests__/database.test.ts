@@ -26,13 +26,15 @@ test('Turso migrations are repeatable and SMS alerts require a verified phone', 
 
   const versions = await database.execute('SELECT version FROM schema_migrations ORDER BY version');
   assert.deepEqual(versions.rows.map((row) => String((row as Record<string, unknown>).version)), [
-    '0001_initial', '0002_sms_verification', '0003_email_verification_expiry', '0004_flood_engine', '0005_service_areas',
+    '0001_initial', '0002_sms_verification', '0003_email_verification_expiry', '0004_flood_engine', '0005_service_areas', '0006_product_core', '0007_sensor_measurements', '0008_disable_simulation_flag',
   ]);
   const columns = await database.execute('PRAGMA table_info(subscriptions)');
   const columnNames = new Set(columns.rows.map((row) => String((row as Record<string, unknown>).name)));
   assert.ok(columnNames.has('phone_verified_at'));
   assert.ok(columnNames.has('phone_verification_token_hash'));
   assert.ok(columnNames.has('verification_expires_at'));
+  const productTables = await database.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projects','device_status','alerts','alert_rules','automation_rules','command_logs','activity_logs')");
+  assert.equal(productTables.rows.length, 7);
 
   const now = new Date().toISOString();
   await database.execute('INSERT INTO tenants(id,name,slug,created_at) VALUES(?,?,?,?)', ['tenant-test', 'Test tenant', 'test-tenant', now]);

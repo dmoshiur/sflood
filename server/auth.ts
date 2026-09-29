@@ -231,7 +231,7 @@ authRouter.post('/bootstrap', bootstrapLimiter, async (req, res, next) => {
         res.status(409).json({ error: 'A super-admin already exists; bootstrap is permanently closed.' });
         return;
       }
-      const tenantResult = await tx.execute("SELECT id FROM tenants WHERE slug='floodguard-demo' ORDER BY created_at LIMIT 1");
+      const tenantResult = await tx.execute("SELECT id FROM tenants WHERE slug='floodguard-project' ORDER BY created_at LIMIT 1");
       if (!tenantResult.rows.length) {
         await tx.rollback();
         res.status(503).json({ error: 'Run npm run db:seed before creating the first super-admin.' });

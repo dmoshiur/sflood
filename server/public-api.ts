@@ -13,10 +13,9 @@ import { z } from 'zod';
 import { normalizeFloodState } from '../shared/flood-state.js';
 import { rateOfRiseCmPerMin } from '../shared/flood-engine.js';
 import {
-  DatabaseRequestError, execute, getTursoDashboard, isTursoConfigured, randomId,
+  DatabaseRequestError, execute, getTursoDashboard, getTursoDeviceDetail, getTursoDeviceReadings, isTursoConfigured, randomId,
   rowBoolean, rowNumber, rowText, currentTimestamp,
 } from './database.js';
-import { getPreviewDashboard, readStore } from './data.js';
 import { listServiceAreas } from './service-areas.js';
 import { getPublishedPage } from './content.js';
 import { acknowledgeCommand, pollPendingCommands } from './commands.js';
@@ -45,10 +44,11 @@ function safetyInstructions(): string[] {
   return DEFAULT_SAFETY_INSTRUCTIONS;
 }
 
-/** Public, read-only current status. Values are real or explicitly labeled SIMULATION. */
+/** Public, read-only current status. Values come from persisted records; absent telemetry stays unknown. */
 publicRouter.get('/status', publicLimiter, async (_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
+    if (!isTursoConfigured) { res.json({ mode: 'unconfigured', online: false, levelCm: null, state: 'UNKNOWN', barrier: null, sensorHealthy: false, lastUpdate: null, devicesOnline: 0, devicesTotal: 0, safetyInstructions: safetyInstructions(), updatedAt: new Date().toISOString() }); return; }
     if (isTursoConfigured) {
       const dashboard = await getTursoDashboard();
       const latestPoints = dashboard.history.slice(-4);
@@ -59,6 +59,7 @@ publicRouter.get('/status', publicLimiter, async (_req, res, next) => {
         : 0;
       res.json({
         mode: 'turso',
+        online: dashboard.stats.activeDevices > 0 && dashboard.system.levelCm !== null,
         simulation: false,
         simulationNotice: null,
         project: dashboard.project,
@@ -73,8 +74,8 @@ publicRouter.get('/status', publicLimiter, async (_req, res, next) => {
         barrierLatched: dashboard.system.barrierLatched,
         sensorHealthy: dashboard.system.sensorHealthy,
         emergencyStopActive: dashboard.system.emergencyStopActive,
-        lastUpdate: dashboard.updatedAt,
-        lastSampleAt: dashboard.history.at(-1)?.createdAt ?? dashboard.updatedAt,
+        lastUpdate: dashboard.history.at(-1)?.createdAt ?? null,
+        lastSampleAt: dashboard.history.at(-1)?.createdAt ?? null,
         devicesOnline: dashboard.stats.activeDevices,
         devicesTotal: dashboard.devices.length,
         maintenanceMode: dashboard.maintenanceMode,
@@ -83,36 +84,6 @@ publicRouter.get('/status', publicLimiter, async (_req, res, next) => {
       });
       return;
     }
-    const store = readStore();
-    const dashboard = getPreviewDashboard(store);
-    const history = store.history.slice(-2);
-    const rate = history.length === 2
-      ? rateOfRiseCmPerMin(history[0]!.levelCm, new Date(history[0]!.createdAt).getTime(), history[1]!.levelCm, new Date(history[1]!.createdAt).getTime())
-      : 0;
-    res.json({
-      mode: 'simulation',
-      simulation: true,
-      simulationNotice: 'SIMULATION MODE — these values come from the labeled local simulator, not from live sensors.',
-      project: dashboard.project,
-      city: dashboard.city,
-      zone: dashboard.zone,
-      state: dashboard.system.state,
-      stateLabel: `SIMULATION · ${dashboard.system.state}`,
-      levelCm: dashboard.system.levelCm,
-      trendCm: dashboard.system.trendCm,
-      rateOfRiseCmPerMin: Math.round(rate * 100) / 100,
-      barrier: dashboard.system.barrier,
-      barrierLatched: dashboard.system.barrierLatched,
-      sensorHealthy: dashboard.system.sensorHealthy,
-      emergencyStopActive: dashboard.system.emergencyStopActive,
-      lastUpdate: dashboard.updatedAt,
-      lastSampleAt: store.history.at(-1)?.createdAt ?? dashboard.updatedAt,
-      devicesOnline: dashboard.stats.activeDevices,
-      devicesTotal: dashboard.devices.length,
-      maintenanceMode: dashboard.maintenanceMode,
-      safetyInstructions: safetyInstructions(),
-      updatedAt: new Date().toISOString(),
-    });
   } catch (error) { next(error); }
 });
 
@@ -135,6 +106,7 @@ publicRouter.get('/flood-events', publicLimiter, async (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 12));
   try {
+    if (!isTursoConfigured) { res.json({ mode: 'unconfigured', events: [] }); return; }
     if (isTursoConfigured) {
       const result = await execute(
         'SELECT id,event_key,state,severity,level_cm,reason,simulation,created_at FROM flood_events ORDER BY created_at DESC LIMIT ?',
@@ -156,15 +128,6 @@ publicRouter.get('/flood-events', publicLimiter, async (req, res, next) => {
       });
       return;
     }
-    const store = readStore();
-    res.json({
-      mode: 'simulation',
-      simulation: true,
-      events: store.events.slice(0, limit).map((event) => ({
-        id: event.id, key: event.title, state: event.state, severity: event.state === 'CRITICAL' ? 'CRITICAL' : event.state === 'INFO' ? 'INFO' : 'WARNING',
-        levelCm: null, reason: event.message, simulation: true, createdAt: event.createdAt,
-      })),
-    });
   } catch (error) { next(error); }
 });
 
@@ -240,6 +203,7 @@ const ackSchema = z.object({
 });
 
 async function authenticateDevice(deviceId: string, req: express.Request): Promise<{ tenantId: string; zoneId: string; kind: string }> {
+  if (!isTursoConfigured) throw new DatabaseRequestError(503, 'Device API requires a configured Turso database.');
   const token = bearerToken(req);
   if (!token || token.length < 16) throw new DatabaseRequestError(401, 'A device bearer key is required.');
   if (isTursoConfigured && !isIpAllowedByCidr(clientIp(req), process.env.DEVICE_CIDR_ALLOWLIST)) {
@@ -254,11 +218,29 @@ async function authenticateDevice(deviceId: string, req: express.Request): Promi
     if (rowText(row, 'approval_state') !== 'APPROVED') throw new DatabaseRequestError(403, 'Device is not approved.');
     return { tenantId: rowText(row, 'tenant_id'), zoneId: rowText(row, 'zone_id'), kind: rowText(row, 'kind') };
   }
-  const store = readStore();
-  const device = store.devices.find((item) => item.id === deviceId && item.enabled);
-  if (!device || !safeEqualHex(hashToken(token), device.apiKeyHash)) throw new DatabaseRequestError(401, 'Device credentials are invalid.');
-  return { tenantId: 'simulation', zoneId: store.zone, kind: device.kind === 'ESP32 controller' ? 'ESP32_CONTROLLER' : 'ESP8266_SENDER' };
+  throw new DatabaseRequestError(503, 'Device API requires a configured Turso database.');
 }
+
+deviceRouter.get('/devices/:deviceId/status', deviceLimiter, async (req, res, next) => {
+  try {
+    const identity = await authenticateDevice(String(req.params.deviceId), req);
+    const detail = await getTursoDeviceDetail(String(req.params.deviceId), identity.tenantId);
+    if (!detail) { res.status(404).json({ error: 'Device not found.' }); return; }
+    res.json({ success: true, data: { device: detail.device, latestReading: detail.history.at(-1) ?? null, serverTime: currentTimestamp() } });
+  } catch (error) { next(error); }
+});
+
+deviceRouter.get('/devices/:deviceId/readings', deviceLimiter, async (req, res, next) => {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+  const from = typeof req.query.from === 'string' && Number.isFinite(Date.parse(req.query.from)) ? new Date(req.query.from).toISOString() : undefined;
+  const to = typeof req.query.to === 'string' && Number.isFinite(Date.parse(req.query.to)) ? new Date(req.query.to).toISOString() : undefined;
+  try {
+    const identity = await authenticateDevice(String(req.params.deviceId), req);
+    const readings = await getTursoDeviceReadings(String(req.params.deviceId), identity.tenantId, limit, from, to);
+    if (!readings) { res.status(404).json({ error: 'Device not found.' }); return; }
+    res.json({ success: true, data: { readings } });
+  } catch (error) { next(error); }
+});
 
 deviceRouter.post('/heartbeat', deviceLimiter, async (req, res, next) => {
   const parsed = heartbeatSchema.safeParse(req.body);
@@ -271,6 +253,7 @@ deviceRouter.post('/heartbeat', deviceLimiter, async (req, res, next) => {
         'UPDATE devices SET last_seen_at=?,uptime_s=COALESCE(?,uptime_s),last_rssi=COALESCE(?,last_rssi),fault_state=?,firmware_version=COALESCE(?,firmware_version),updated_at=? WHERE id=?',
         [now, parsed.data.uptimeS ?? null, parsed.data.rssi ?? null, parsed.data.faultState ?? null, parsed.data.firmwareVersion ?? null, now, parsed.data.deviceId],
       );
+      await execute(`INSERT INTO device_status(device_id,online,sensor_status,last_heartbeat_at,updated_at) VALUES(?,1,?,?,?) ON CONFLICT(device_id) DO UPDATE SET online=1,last_heartbeat_at=excluded.last_heartbeat_at,updated_at=excluded.updated_at`, [parsed.data.deviceId, parsed.data.faultState ? 'fault' : 'unknown', now, now]);
     }
     res.json({ ok: true, serverTime: now, commandsAvailable: isTursoConfigured });
   } catch (error) { next(error); }

@@ -7,6 +7,7 @@ import rateLimit from 'express-rate-limit';
 import { v2 as cloudinary } from 'cloudinary';
 import { z } from 'zod';
 import { requireCsrf, requireSession, type AuthUser } from './auth.js';
+import { hashPassword, verifyPassword } from './security.js';
 import { DatabaseRequestError, execute, insertAudit, isTursoConfigured, randomId, currentTimestamp, rowText } from './database.js';
 
 export const profileRouter = express.Router();
@@ -77,6 +78,21 @@ profileRouter.put('/', requireCsrf, async (req, res, next) => {
     await execute(`UPDATE users SET ${sets.join(',')} WHERE id=?`, args);
     await insertAudit({ tenantId: user.tenantId, actorId: user.id, action: 'PROFILE_UPDATED', targetType: 'user', targetId: user.id, metadata: { fields: Object.keys(parsed.data) }, ipAddress: req.ip });
     res.json({ saved: true, notificationPrefs: prefs });
+  } catch (error) { next(error); }
+});
+
+const passwordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
+profileRouter.put('/password', requireCsrf, async (req, res, next) => {
+  const parsed = passwordChangeSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Provide the current password and a new password of at least 12 characters.' }); return; }
+  const user = res.locals.authUser as AuthUser;
+  try {
+    const result = await execute('SELECT password_hash FROM users WHERE id=?', [user.id]);
+    if (!result.rows.length || !(await verifyPassword(parsed.data.currentPassword, rowText(result.rows[0], 'password_hash')))) { res.status(400).json({ error: 'The current password is incorrect.' }); return; }
+    await execute('UPDATE users SET password_hash=?,updated_at=? WHERE id=?', [await hashPassword(parsed.data.newPassword), currentTimestamp(), user.id]);
+    await execute('UPDATE sessions SET revoked_at=? WHERE user_id=? AND id<>? AND revoked_at IS NULL', [currentTimestamp(), user.id, user.sessionId]);
+    await insertAudit({ tenantId: user.tenantId, actorId: user.id, action: 'PASSWORD_CHANGED', targetType: 'user', targetId: user.id, ipAddress: req.ip });
+    res.json({ changed: true, message: 'Password updated. Other active sessions have been signed out.' });
   } catch (error) { next(error); }
 });
 

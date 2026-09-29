@@ -8,7 +8,7 @@ static const char *FG_WIFI_SSID = "SET_WIFI_NAME_LOCALLY";
 static const char *FG_WIFI_PASSWORD = "SET_WIFI_PASSWORD_LOCALLY";
 // API base for the device endpoints (no trailing slash).
 static const char *FG_API_BASE = "https://YOUR_HOST/api/v1";
-static const char *FG_API_URL = "https://YOUR_HOST/api/v1/telemetry";
+static const char *FG_API_URL = "https://YOUR_HOST/api/v1/devices/fg-esp32-01/telemetry";
 static const char *FG_PROVISION_URL = "https://YOUR_HOST/api/v1/provision";
 static const char *FG_DEVICE_ID = "fg-esp32-01";
 // Leave empty to provision on first boot using the one-time token below.
